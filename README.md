@@ -2,8 +2,6 @@
 
 A web-based Latin reading tool powered by [Whitaker's Words](https://github.com/mk270/whitakers-words). Load Project Gutenberg Latin texts, click any word to see its grammatical analysis, dictionary definition, and full inflection table.
 
-![screenshot](screenshot.png)
-
 ## Features
 
 - **Interactive Reader** — Project Gutenberg Latin books rendered in a medieval-parchment style interface. Click any word to analyze it.
@@ -115,4 +113,3 @@ The parser recognizes `<h2>` chapter headings (e.g., `COMMENTARIUS PRIMUS`) and 
 
 - [Whitaker's Words](https://github.com/mk270/whitakers-words) — the engine behind all Latin analysis, ported from the original Ada code by William Whitaker.
 - [Project Gutenberg](https://www.gutenberg.org/) — source of the Latin texts.
-- [@sidereus](https://github.com/sidereus) — web integration and UI.
