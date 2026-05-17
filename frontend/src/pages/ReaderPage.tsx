@@ -482,6 +482,21 @@ export default function ReaderPage() {
           {'\u2766'} {book?.title || 'Reader'}
         </span>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <button
+            onClick={() => navigate('/')}
+            style={{
+              padding: '5px 12px',
+              borderRadius: '3px',
+              border: '1px solid #8b4513',
+              backgroundColor: '#5a3d2b',
+              color: '#e8d5b0',
+              cursor: 'pointer',
+              fontSize: '12px',
+              fontFamily: 'Georgia, serif',
+            }}
+          >
+            {'\u2190'} Home
+          </button>
           {/* Text search within book */}
           <input
             value={textSearchQ}

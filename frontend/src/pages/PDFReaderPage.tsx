@@ -846,6 +846,21 @@ export default function PDFReaderPage() {
         <span style={S.navTitle} onClick={() => navigate('/')}>
           {'\u2766'} {pageData?.title || 'PDF Reader'}
         </span>
+        <button
+          onClick={() => navigate('/')}
+          style={{
+            padding: '5px 12px',
+            borderRadius: '3px',
+            border: '1px solid #8b4513',
+            backgroundColor: '#5a3d2b',
+            color: '#e8d5b0',
+            cursor: 'pointer',
+            fontSize: '12px',
+            fontFamily: 'Georgia, serif',
+          }}
+        >
+          {'\u2190'} Home
+        </button>
         <span style={S.navLink} onClick={() => { setShowBookshelf(true); navigate('/pdf-reader'); }}>
           Bookshelf
         </span>
