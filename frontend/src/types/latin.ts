@@ -4,22 +4,14 @@ export interface ParseResult {
   lemma: string;
   lemma_form: string;
   part_of_speech: string;
-  pos_code: string;
   translation: string;
   morphology: string;
-  morpho_code: number;
-  model: string;
-  radical: string;
-  ending: string;
 }
 
 export interface DictEntry {
   key: string;
   part_of_speech: string;
   meaning: string;
-  age: string;
-  frequency: string;
-  source: string;
 }
 
 export interface ParseResponse {
@@ -45,13 +37,88 @@ export interface InflectionTable {
   [section: string]: {
     case?: string;
     person?: string;
+    number?: string;
     form: string;
-    ending: string;
   }[];
 }
 
 export interface InflectResponse {
   lemma: string;
   table: InflectionTable | null;
+  error?: string;
+}
+
+/** Book reader types */
+
+export interface ChapterData {
+  number: number;
+  title: string;
+  paragraphs: string[];
+}
+
+export interface BookData {
+  id: string;
+  title: string;
+  author: string;
+  language: string;
+  total_chapters: number;
+  chapters: ChapterData[];
+  pagination: {
+    page: number;
+    per_page: number;
+    total_items: number;
+    total_pages: number;
+    has_next: boolean;
+    has_prev: boolean;
+  };
+}
+
+/** PDF Reader types */
+
+export interface PdfMeta {
+  pdf_id: string;
+  title: string;
+  total_pages: number;
+}
+
+export interface PdfListResponse {
+  pdfs: PdfMeta[];
+}
+
+export interface PdfUploadResponse {
+  pdf_id: string;
+  total_pages: number;
+  title: string;
+}
+
+export interface BookshelfBook {
+  pdf_id: string;
+  title: string;
+  total_pages: number;
+  cover_thumb: string | null;
+}
+
+export interface BookshelfResponse {
+  books: BookshelfBook[];
+}
+
+export interface PdfPageResponse {
+  page_img: string;
+  ocr_text: string;
+  lines: { text: string; bbox: number[] | null }[];
+  page_num: number;
+  total_pages: number;
+  title: string;
+  cached: boolean;
+  ocr_pending?: boolean;
+  user_edited?: boolean;
+  error?: string;
+}
+
+export interface PdfStatusResponse {
+  pdf_id: string;
+  title: string;
+  total_pages: number;
+  cached_pages: number;
   error?: string;
 }

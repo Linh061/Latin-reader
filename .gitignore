@@ -5,6 +5,7 @@ node_modules/
 dist/
 .vite/
 backend/cache/*.json
+backend/pdf_books/
 .DS_Store
 *.swp
 *.swo

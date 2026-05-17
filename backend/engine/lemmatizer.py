@@ -41,7 +41,7 @@ class Lemmatizer:
         self.conn.row_factory = sqlite3.Row
 
     def lemmatize(self, word: str) -> List[dict]:
-        """Return list of {lemma, part_of_speech, meaning, morphology}."""
+        """Return list of {lemma, lemma_form, part_of_speech, meaning, translation, morphology}."""
         self._ready()
         w = norm(word.lower().strip())
         c = self.conn.cursor()
@@ -61,8 +61,10 @@ class Lemmatizer:
             seen.add(lemma)
             out.append({
                 "lemma": lemma,
+                "lemma_form": lemma,
                 "part_of_speech": r["pos"],
                 "meaning": r["meaning"] or "",
+                "translation": r["meaning"] or "",
                 "morphology": r["morphology"] or "",
             })
         return out

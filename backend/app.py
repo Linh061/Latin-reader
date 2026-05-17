@@ -19,7 +19,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from engine.lemmatizer import get_lemmatizer, lemmatize
 from engine.dictionary import get_dictionary, lookup
 from engine.inflection import generate_table
+from engine.ocr import ocr_image, ocr_image_with_analysis
+from engine.pdf_ocr import get_pdf_processor
 from books import load_book, list_books, search_books
+
 
 app = Flask(__name__)
 CORS(app)
@@ -176,10 +179,125 @@ def analyze_word():
         return jsonify({"error": str(e)}), 500
 
 
+# ── OCR ─────────────────────────────────────────────────────────────────────
+
+import base64
+import tempfile
+import uuid
+
+
+@app.route("/api/ocr", methods=["POST"])
+def ocr_recognize():
+    """
+    Recognize Latin text in an image using Kraken OCR.
+
+    Accepts either:
+        - JSON: { "image": "base64-encoded-image-data", "model_type": "print|manuscript" }
+        - multipart/form-data with file field "image"
+
+    Returns:
+        full_text: Recognized text.
+        lines: List of {text, bbox}.
+        error: Optional error message.
+    """
+    image_data = None
+    model_type = "print"
+
+    # Try multipart file upload first
+    if "image" in request.files:
+        file = request.files["image"]
+        image_data = file.read()
+        model_type = request.form.get("model_type", "print")
+    # Then try base64 JSON
+    elif request.is_json:
+        data = request.get_json()
+        if data and "image" in data:
+            raw = data["image"]
+            if "," in raw:
+                raw = raw.split(",", 1)[1]
+            try:
+                image_data = base64.b64decode(raw)
+            except Exception:
+                return jsonify({"error": "Invalid base64 image data"}), 400
+            model_type = data.get("model_type", "print")
+
+    if not image_data:
+        return jsonify({"error": "Missing 'image' (file or base64)"}), 400
+
+    tmp_path = os.path.join(tempfile.gettempdir(), f"latin_ocr_{uuid.uuid4().hex}.png")
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(image_data)
+
+        result = ocr_image(tmp_path, model_type)
+        if "error" in result and result["error"] and not result.get("full_text"):
+            return jsonify(result), 500
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+@app.route("/api/ocr/analyze", methods=["POST"])
+def ocr_analyze():
+    """
+    Recognize Latin text in an image AND analyze each word.
+
+    Accepts same input as /api/ocr.
+
+    Returns:
+        full_text: Recognized text.
+        lines: List of {text, bbox}.
+        words: List of {word, analyses} from lemmatizer.
+        error: Optional error message.
+    """
+    image_data = None
+    model_type = "print"
+
+    if "image" in request.files:
+        file = request.files["image"]
+        image_data = file.read()
+        model_type = request.form.get("model_type", "print")
+    elif request.is_json:
+        data = request.get_json()
+        if data and "image" in data:
+            raw = data["image"]
+            if "," in raw:
+                raw = raw.split(",", 1)[1]
+            try:
+                image_data = base64.b64decode(raw)
+            except Exception:
+                return jsonify({"error": "Invalid base64 image data"}), 400
+            model_type = data.get("model_type", "print")
+
+    if not image_data:
+        return jsonify({"error": "Missing 'image' (file or base64)"}), 400
+
+    lang = request.form.get("lang", "en") if not request.is_json else request.get_json().get("lang", "en")
+
+    tmp_path = os.path.join(tempfile.gettempdir(), f"latin_ocr_{uuid.uuid4().hex}.png")
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(image_data)
+
+        result = ocr_image_with_analysis(tmp_path, lang, model_type)
+        if "error" in result and result["error"] and not result.get("full_text"):
+            return jsonify(result), 500
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
 # ── Books ───────────────────────────────────────────────────────────────────
 
 
 @app.route("/api/books", methods=["GET"])
+
 def books_list():
     """List all available books."""
     try:
@@ -300,6 +418,188 @@ def search():
         return jsonify({"error": str(e)}), 500
 
 
+# ── PDF OCR ─────────────────────────────────────────────────────────────────
+
+
+@app.route("/api/pdf/upload", methods=["POST"])
+def pdf_upload():
+    """
+    Upload a PDF for OCR reading.
+
+    multipart/form-data:
+        file: the PDF file
+        model_type: "print" or "manuscript" (default "print")
+
+    Returns:
+        pdf_id, total_pages, title
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "Missing 'file'"}), 400
+
+    file = request.files["file"]
+    pdf_bytes = file.read()
+    if not pdf_bytes:
+        return jsonify({"error": "Empty file"}), 400
+
+    try:
+        proc = get_pdf_processor()
+        result = proc.upload(pdf_bytes, file.filename or "")
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pdf/bookshelf", methods=["GET"])
+def pdf_bookshelf():
+    """List all uploaded PDFs with cover thumbnails (for bookshelf display)."""
+    try:
+        proc = get_pdf_processor()
+        pdfs = proc.list_pdfs()
+        bookshelf = []
+        for p in pdfs:
+            cover = proc.get_cover_thumbnail(p["pdf_id"])
+            bookshelf.append({
+                "pdf_id": p["pdf_id"],
+                "title": p["title"],
+                "total_pages": p["total_pages"],
+                "cover_thumb": cover,
+            })
+        return jsonify({"books": bookshelf})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pdf/list", methods=["GET"])
+def pdf_list():
+    """List all uploaded PDFs."""
+    try:
+        proc = get_pdf_processor()
+        return jsonify({"pdfs": proc.list_pdfs()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pdf/<pdf_id>/page/<int:page_num>/ocr", methods=["GET"])
+def pdf_page_ocr(pdf_id: str, page_num: int):
+    """Poll OCR text for a page (async after get_page returns image)."""
+    model_type = request.args.get("model_type", "print")
+    try:
+        proc = get_pdf_processor()
+        result = proc.get_ocr(pdf_id, page_num, model_type)
+        if "error" in result:
+            return jsonify(result), 404 if "not found" in result.get("error", "") else 400
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pdf/<pdf_id>/page/<int:page_num>", methods=["GET"])
+def pdf_page(pdf_id: str, page_num: int):
+    """
+    Get a page from a PDF: rendered image (base64) + display text.
+
+    Display text is user-edited text if saved, or OCR text as fallback.
+    OCR runs in background for uncached pages (poll /api/pdf/<id>/page/<n>/ocr).
+
+    Query params:
+        model_type: "print" or "manuscript" (default "print")
+
+    Returns:
+        page_img (base64), ocr_text, lines, page_num, total_pages, title, cached, user_edited
+    """
+    model_type = request.args.get("model_type", "print")
+    try:
+        proc = get_pdf_processor()
+        result = proc.get_page_display(pdf_id, page_num, model_type)
+        if "error" in result:
+            return jsonify(result), 404 if "not found" in result.get("error", "") else 400
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pdf/<pdf_id>/page/<int:page_num>/text", methods=["PUT"])
+def pdf_page_save_text(pdf_id: str, page_num: int):
+    """
+    Save user-edited text for a page. Permanent storage.
+
+    Request JSON:
+        text: str - The edited Latin text
+
+    Returns:
+        success: bool, saved_at: int (unix timestamp)
+    """
+    data = request.get_json()
+    if not data or "text" not in data:
+        return jsonify({"error": "Missing 'text' in request body"}), 400
+    try:
+        proc = get_pdf_processor()
+        result = proc.save_page_text(pdf_id, page_num, data["text"])
+        if "error" in result:
+            return jsonify(result), 400
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pdf/<pdf_id>/analyze/<int:page_num>", methods=["POST"])
+def pdf_analyze_word(pdf_id: str, page_num: int):
+    """
+    Analyze a specific word on a PDF page.
+
+    Request JSON:
+        word: str - The Latin word to analyze
+
+    Returns:
+        Same as /api/analyze
+    """
+    data = request.get_json()
+    if not data or "word" not in data:
+        return jsonify({"error": "Missing 'word'"}), 400
+
+    word = data["word"].strip()
+    if not word:
+        return jsonify({"error": "Empty word"}), 400
+
+    try:
+        from engine.lemmatizer import lemmatize
+        from engine.dictionary import lookup
+
+        parse_results = lemmatize(word)
+        dict_results = {}
+        for pr in parse_results:
+            lk = pr.get("lemma", "")
+            if lk and lk not in dict_results:
+                dict_results[lk] = lookup(lk)
+
+        return jsonify({"word": word, "parses": parse_results, "dictionary": dict_results})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pdf/<pdf_id>", methods=["DELETE"])
+def pdf_delete(pdf_id: str):
+    """Delete a PDF and its cache."""
+    try:
+        proc = get_pdf_processor()
+        result = proc.delete_pdf(pdf_id)
+        if "error" in result:
+            return jsonify(result), 404 if "not found" in result.get("error", "") else 400
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pdf/<pdf_id>/status", methods=["GET"])
+def pdf_status(pdf_id: str):
+    """Get OCR processing status for a PDF."""
+    try:
+        proc = get_pdf_processor()
+        return jsonify(proc.get_status(pdf_id))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ── Serve frontend (built by Vite) ──────────────────────────────────────────
 
 FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -334,4 +634,4 @@ if __name__ == "__main__":
     get_dictionary()
     print("Ready!")
     
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host="127.0.0.1", port=5000, debug=True, use_reloader=False)

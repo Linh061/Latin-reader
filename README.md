@@ -1,16 +1,16 @@
 # Latin Reader
 
-A web-based Latin reading tool powered by [Whitaker's Words](https://github.com/mk270/whitakers-words). Load Project Gutenberg Latin texts, click any word to see its grammatical analysis, dictionary definition, and full inflection table.
+A web-based Latin reading tool powered by [Whitaker's Words](https://github.com/mk270/whitakers-words). Read Project Gutenberg Latin texts or upload PDFs, click any word to see its grammatical analysis and dictionary definition.
 
 ## Features
 
-- **Interactive Reader** — Project Gutenberg Latin books rendered in a medieval-parchment style interface. Click any word to analyze it.
+- **Interactive Reader** — Project Gutenberg Latin books in a parchment-style interface. Click any word to analyze.
+- **PDF Reader** — Upload PDFs of Latin texts; Kraken OCR with automatic word analysis. Page-by-page image + text view.
 - **Grammatical Analysis** — Part-of-speech, lemma, morphology, and translation for every word form.
 - **Dictionary Lookup** — Full Whitaker's Words dictionary entries for every lemma.
 - **Inflection Tables** — Complete declension / conjugation tables for any identified lemma.
-- **Full-Text Search** — Search across all books for a word or phrase; results with context snippets and highlighted matches.
-- **Pagination** — Large books split into pages of 30 paragraphs each.
-- **Dark Academia UI** — Parchment-toned background, drop caps, ornamental dividers, serif typography.
+- **Full-Text Search** — Search across all books; results with context snippets and highlighted matches.
+- **Dark Academia UI** — Parchment-toned background, serif typography, ornamental details.
 
 ## Tech Stack
 
@@ -19,6 +19,7 @@ A web-based Latin reading tool powered by [Whitaker's Words](https://github.com/
 | Backend | Python 3, Flask |
 | Frontend | React, TypeScript, Vite |
 | Latin Engine | [Whitaker's Words](https://github.com/mk270/whitakers-words) (Ada, compiled to SQLite) |
+| OCR | Kraken (CLI) |
 | Book Source | [Project Gutenberg](https://www.gutenberg.org/) |
 
 ## Quick Start
@@ -28,6 +29,7 @@ A web-based Latin reading tool powered by [Whitaker's Words](https://github.com/
 - Python 3.8+
 - Node.js 18+
 - npm 9+
+- [Kraken](https://github.com/mittagessen/kraken) CLI installed (`pip install kraken`)
 
 ### 1. Set up the backend
 
@@ -37,11 +39,9 @@ pip install -r requirements.txt
 python3 app.py
 ```
 
-The server starts at `http://127.0.0.1:5000`. It pre-loads the Latin lemmatizer and dictionary on startup (takes a few seconds).
+The server starts at `http://127.0.0.1:5000`. It pre-loads the Latin lemmatizer and dictionary on startup.
 
 ### 2. (Optional) Rebuild the frontend
-
-If you modify any TypeScript code, rebuild the static files:
 
 ```bash
 cd frontend
@@ -62,7 +62,16 @@ Then restart the Flask server.
 | `/api/parse` | POST | Lemmatize a word form |
 | `/api/dict` | POST | Look up a dictionary entry |
 | `/api/inflect` | POST | Generate inflection table for a lemma |
-| `/api/search?q=&page=&per_page=` | GET | Full-text search across books |
+| `/api/search?q=` | GET | Full-text search across books |
+| `/api/ocr` | POST | Recognize Latin text from an uploaded image |
+| `/api/ocr/analyze` | POST | Recognize + word-by-word analysis |
+| `/api/pdf/upload` | POST | Upload a PDF for OCR reading |
+| `/api/pdf/bookshelf` | GET | List uploaded PDFs with cover thumbnails |
+| `/api/pdf/<id>/page/<n>` | GET | Get rendered page image + text |
+| `/api/pdf/<id>/page/<n>/ocr` | GET | Poll OCR text for a page |
+| `/api/pdf/<id>/page/<n>/text` | PUT | Save user-edited text |
+| `/api/pdf/<id>/analyze/<n>` | POST | Analyze a word on a PDF page |
+| `/api/pdf/<id>` | DELETE | Delete a PDF and its cache |
 
 ## Project Structure
 
@@ -74,42 +83,42 @@ Latin-reader/
 │   ├── books/
 │   │   ├── __init__.py        # PG HTML parser, book cache, search
 │   │   └── data/              # PG HTML source files
-│   │       ├── pg218-images.html      # Caesar, Gallic War I-IV
-│   │       └── pg18837-images.html    # Caesar, Gallic War V-VIII
-│   ├── cache/                 # Cached book JSON files
+│   ├── cache/                 # Cached book JSON + Whitaker's Words DB
 │   ├── data/                  # Whitaker's Words dictionary data
-│   └── engine/
-│       ├── lemmatizer.py      # Latin lemmatization
-│       ├── dictionary.py      # Dictionary lookup
-│       └── inflection.py      # Inflection table generation
+│   ├── engine/
+│   │   ├── lemmatizer.py      # Latin lemmatization
+│   │   ├── dictionary.py      # Dictionary lookup
+│   │   ├── inflection.py      # Inflection table generation
+│   │   ├── ocr.py             # Kraken OCR text recognition
+│   │   └── pdf_ocr.py         # PDF upload, rendering, OCR pipeline
+│   └── pdf_books/             # Uploaded PDFs + OCR cache (gitignored)
 ├── frontend/
 │   ├── src/
-│   │   ├── App.tsx            # Main React application
+│   │   ├── App.tsx            # Root component (route-based)
 │   │   ├── main.tsx           # Entry point
-│   │   ├── hooks/useApi.ts    # API helper
+│   │   ├── pages/             # Route pages (Home, Reader, OCR, PDFReader)
 │   │   └── types/latin.ts     # TypeScript type definitions
 │   └── dist/                  # Built static files (served by Flask)
-├── whitakers-words/           # Whitaker's Words source (Ada)
-└── electron/                  # Optional Electron shell
+└── .gitignore
 ```
 
 ## How It Works
 
-1. **Book import:** `books/__init__.py` parses each Project Gutenberg HTML file into chapters and paragraphs. The result is cached as JSON in `backend/cache/`.
-2. **Analysis:** When you click a word, the frontend sends it to `/api/analyze`. The backend calls the Whitaker's Words engine to lemmatize the form, then looks up the lemma in the dictionary.
-3. **Inflection:** Clicking "Declina …" sends the lemma back to `/api/inflect`, which generates a complete declension or conjugation table.
-4. **Search:** `/api/search` does a case-insensitive substring match across all cached book paragraphs.
+1. **Book import:** `books/__init__.py` parses Project Gutenberg HTML files into chapters and paragraphs. Cached as JSON.
+2. **Analysis:** Click a word → `/api/analyze` → lemmatize → dictionary lookup.
+3. **Inflection:** Click "Declina …" → `/api/inflect` → full declension/conjugation table.
+4. **PDF OCR:** Upload PDF → render page image → Kraken OCR in background → poll for text → click any word to analyze.
+5. **Search:** `/api/search` does case-insensitive substring match across all cached book paragraphs.
 
-## Adding Your Own Books
+## Adding Books
 
 1. Download a Latin text from Project Gutenberg in "HTML" format.
 2. Place the `.html` file in `backend/books/data/`.
 3. Add a new entry to `BOOKS_CONFIG` in `backend/books/__init__.py`.
 4. Restart the server.
 
-The parser recognizes `<h2>` chapter headings (e.g., `COMMENTARIUS PRIMUS`) and `<p>Liber V</p>` markers.
-
 ## Credits
 
 - [Whitaker's Words](https://github.com/mk270/whitakers-words) — the engine behind all Latin analysis, ported from the original Ada code by William Whitaker.
 - [Project Gutenberg](https://www.gutenberg.org/) — source of the Latin texts.
+- [Kraken](https://github.com/mittagessen/kraken) — OCR engine for Latin text recognition.
