@@ -6,7 +6,7 @@ The meaning field from DICTLINE.GEN contains Whitaker's annotation codes
 (e.g. "X X X A O" for age/area/frequency) which are stripped for display.
 """
 import os, re, sqlite3
-from typing import Optional, List
+from typing import List, Optional
 
 DB = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache", "words.db")
 
@@ -86,14 +86,44 @@ class Dictionary:
             })
         return out
 
+    def reverse_lookup(self, english_word: str, max_results: int = 30) -> List[dict]:
+        """English → Latin reverse lookup: search lemmas by English meaning.
 
-_default: Optional[Dictionary] = None
+        Returns [{key, part_of_speech, meaning}] where meaning contains the
+        English search term.
+        """
+        self._ready()
+        w = english_word.strip().lower()
+        if not w:
+            return []
+        c = self.conn.cursor()
+        c.execute("""
+            SELECT lemma, pos, meaning
+            FROM lemmas
+            WHERE meaning LIKE ?
+            ORDER BY lemma
+            LIMIT ?
+        """, (f'%{w}%', max_results))
+        out = []
+        seen = set()
+        for r in c.fetchall():
+            lemma = r["lemma"]
+            if lemma in seen:
+                continue
+            seen.add(lemma)
+            out.append({
+                "key": lemma,
+                "part_of_speech": r["pos"],
+                "meaning": _clean_meaning(r["meaning"] or ""),
+            })
+        return out
+
 
 def get_dictionary() -> Dictionary:
-    global _default
-    if _default is None:
-        _default = Dictionary()
-    return _default
+    return Dictionary()
 
 def lookup(key: str) -> List[dict]:
     return get_dictionary().lookup(key)
+
+def reverse_lookup(word: str, max_results: int = 30) -> List[dict]:
+    return get_dictionary().reverse_lookup(word, max_results)

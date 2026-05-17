@@ -6,6 +6,7 @@ import type {
   ParseResult,
   DictEntry,
   AnalyzeResponse,
+  InflectResponse,
 } from '../types/latin';
 
 const API = '';
@@ -187,10 +188,30 @@ function renderText(text: string, onClick: (word: string, e: React.MouseEvent) =
 
 // ─── Helper Components ─────────────────────────────────────────────────────
 
-function ParseResultCard({ result }: { result: ParseResult }) {
+function ParseResultCard({ result, onInflect }: { result: ParseResult; onInflect?: (lemma: string) => void }) {
   return (
     <div style={S.resultCard}>
-      <div style={S.lemma}>{result.lemma_form}</div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={S.lemma}>{result.lemma_form}</div>
+        {onInflect && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onInflect(result.lemma); }}
+            title="Show inflection table"
+            style={{
+              padding: '1px 6px',
+              fontSize: '10px',
+              border: '1px solid #8b4513',
+              borderRadius: '3px',
+              backgroundColor: '#5a3d2b',
+              color: '#e8d5b0',
+              cursor: 'pointer',
+              fontFamily: 'Georgia, serif',
+            }}
+          >
+            {'\uD83D\uDCCA'} Inflect
+          </button>
+        )}
+      </div>
       <div style={S.pos}>{result.part_of_speech}</div>
       {result.morphology && <div style={S.morphology}>{result.morphology}</div>}
       {result.translation && <div style={S.translation}>{result.translation}</div>}
@@ -221,10 +242,24 @@ export default function ReaderPage() {
     y: number;
     parses: ParseResult[];
     dict: DictEntry[];
+    suggestions?: string[];
   } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const popupRef = useRef<HTMLDivElement>(null);
+  const [searchWord, setSearchWord] = useState('');
+  const [searchingWord, setSearchingWord] = useState(false);
+  const [reverseMode, setReverseMode] = useState(false); // false=Latin→Eng, true=Eng→Latin
+  const [textSearchQ, setTextSearchQ] = useState('');
+  const [textSearching, setTextSearching] = useState(false);
+  const [textSearchResults, setTextSearchResults] = useState<{
+    chapter_number: number;
+    chapter_title: string;
+    text: string;
+    match_index: number;
+  }[] | null>(null);
+  const [inflectTable, setInflectTable] = useState<{ lemma: string; table: InflectResponse['table'] } | null>(null);
+  const [inflecting, setInflecting] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState<{
     page: number;
@@ -234,7 +269,7 @@ export default function ReaderPage() {
     has_next: boolean;
     has_prev: boolean;
   } | null>(null);
-  const PER_PAGE = 30;
+  const PER_PAGE = 10;
 
   // Load book
   const loadBook = useCallback(async (id: string, p: number) => {
@@ -264,6 +299,95 @@ export default function ReaderPage() {
   useEffect(() => {
     if (bookId) loadBook(bookId, page);
   }, [bookId, page, loadBook]);
+
+  // Search word from header (Latin→Eng or Eng→Latin)
+  const handleSearchWord = useCallback(async () => {
+    const word = searchWord.trim();
+    if (!word) return;
+    setSearchingWord(true);
+    setPopup(null);
+    try {
+      if (reverseMode) {
+        // English → Latin reverse lookup
+        const res = await fetch(`${API}/api/reverse`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ word }),
+        });
+        const data = await res.json();
+        setPopup({
+          word,
+          x: 60,
+          y: 120,
+          parses: [],
+          dict: (data.results || []).map((r: any) => ({
+            key: r.key,
+            part_of_speech: r.part_of_speech,
+            meaning: r.meaning,
+          })),
+        });
+      } else {
+        // Latin → English fuzzy search
+        const res = await fetch(`${API}/api/fuzzy`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ word }),
+        });
+        const data = await res.json();
+
+        if (data.exact && data.exact.length > 0) {
+          const allDict: DictEntry[] = [];
+          for (const pr of data.exact) {
+            const dRes = await fetch(`${API}/api/dict`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ key: pr.lemma }),
+            });
+            const dData = await dRes.json();
+            if (dData.results) allDict.push(...dData.results);
+          }
+          setPopup({
+            word,
+            x: 60,
+            y: 120,
+            parses: data.exact,
+            dict: allDict,
+          });
+        } else if (data.fuzzy && data.fuzzy.length > 0) {
+          setPopup({
+            word,
+            x: 60,
+            y: 120,
+            parses: [],
+            dict: [],
+            suggestions: data.fuzzy.map((f: any) => `${f.form} (${f.lemma}, ${f.part_of_speech})`),
+          });
+        } else if (data.prefix && data.prefix.length > 0) {
+          setPopup({
+            word,
+            x: 60,
+            y: 120,
+            parses: [],
+            dict: [],
+            suggestions: data.prefix.map((f: any) => `${f.form} (${f.lemma}, ${f.part_of_speech})`),
+          });
+        } else {
+          setPopup({
+            word,
+            x: 60,
+            y: 120,
+            parses: [],
+            dict: [],
+            suggestions: [],
+          });
+        }
+      }
+    } catch (err: any) {
+      setError(`Search failed: ${err.message}`);
+    } finally {
+      setSearchingWord(false);
+    }
+  }, [searchWord, reverseMode]);
 
   // Click word -> analyze
   const handleWordClick = useCallback(async (word: string, e: React.MouseEvent) => {
@@ -297,6 +421,46 @@ export default function ReaderPage() {
     }
   }, []);
 
+  // Search text within current book
+  const handleTextSearch = useCallback(async () => {
+    const q = textSearchQ.trim();
+    if (!q || !bookId) return;
+    setTextSearching(true);
+    setTextSearchResults(null);
+    try {
+      const res = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}&book_id=${bookId}`);
+      const data = await res.json();
+      setTextSearchResults(data.results || []);
+    } catch {
+      setTextSearchResults([]);
+    } finally {
+      setTextSearching(false);
+    }
+  }, [textSearchQ, bookId]);
+
+  // Fetch inflection table for a lemma
+  const handleInflect = useCallback(async (lemma: string) => {
+    setInflecting(lemma);
+    setInflectTable(null);
+    try {
+      const res = await fetch(`${API}/api/inflect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lemma }),
+      });
+      const data: InflectResponse = await res.json();
+      if (data.table) {
+        setInflectTable({ lemma, table: data.table });
+      } else {
+        setInflectTable({ lemma, table: null });
+      }
+    } catch {
+      setInflectTable({ lemma, table: null });
+    } finally {
+      setInflecting(null);
+    }
+  }, []);
+
   // Close popup on background click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -317,6 +481,94 @@ export default function ReaderPage() {
         <span style={S.title} onClick={() => navigate('/')}>
           {'\u2766'} {book?.title || 'Reader'}
         </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {/* Text search within book */}
+          <input
+            value={textSearchQ}
+            onChange={e => setTextSearchQ(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') handleTextSearch(); }}
+            placeholder="Search in this book…"
+            style={{
+              padding: '5px 10px',
+              borderRadius: '3px',
+              border: '1px solid #8b4513',
+              backgroundColor: '#faf0dc',
+              color: '#2c1810',
+              fontSize: '12px',
+              fontFamily: 'Georgia, serif',
+              outline: 'none',
+              width: '160px',
+            }}
+          />
+          <button
+            onClick={handleTextSearch}
+            disabled={textSearching}
+            style={{
+              padding: '5px 12px',
+              borderRadius: '3px',
+              border: '1px solid #8b4513',
+              backgroundColor: '#5a3d2b',
+              color: '#e8d5b0',
+              cursor: 'pointer',
+              fontSize: '12px',
+              fontFamily: 'Georgia, serif',
+            }}
+          >
+            {textSearching ? '\u2026' : '\uD83D\uDD0D'}
+          </button>
+          {/* Latin/English mode toggle */}
+          <button
+            onClick={() => setReverseMode(m => !m)}
+            title={reverseMode ? 'Switch to Latin→English' : 'Switch to English→Latin'}
+            style={{
+              padding: '5px 8px',
+              borderRadius: '3px',
+              border: '1px solid #8b4513',
+              backgroundColor: reverseMode ? '#2d5a2e' : '#5a3d2b',
+              color: '#e8d5b0',
+              cursor: 'pointer',
+              fontSize: '11px',
+              fontFamily: 'Georgia, serif',
+              fontWeight: 'bold',
+            }}
+          >
+            {reverseMode ? 'Eng\u2192Lat' : 'Lat\u2192Eng'}
+          </button>
+          {/* Word search */}
+          <input
+            value={searchWord}
+            onChange={e => setSearchWord(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') handleSearchWord(); }}
+            placeholder="Search any Latin word…"
+            style={{
+              padding: '5px 10px',
+              borderRadius: '3px',
+              border: '1px solid #8b4513',
+              backgroundColor: '#faf0dc',
+              color: '#2c1810',
+              fontSize: '12px',
+              fontFamily: 'Georgia, serif',
+              outline: 'none',
+              width: '180px',
+            }}
+          />
+          <button
+            onClick={handleSearchWord}
+            disabled={searchingWord}
+            style={{
+              padding: '5px 12px',
+              borderRadius: '3px',
+              border: '1px solid #8b4513',
+              backgroundColor: '#5a3d2b',
+              color: '#e8d5b0',
+              cursor: 'pointer',
+              fontSize: '12px',
+              fontFamily: 'Georgia, serif',
+            }}
+          >
+            {searchingWord ? '\u2026' : '\uD83D\uDD0D'}
+          </button>
+        </div>
       </header>
 
       {/* Main */}
@@ -325,6 +577,45 @@ export default function ReaderPage() {
         <div style={S.leftPanel}>
           {error && <div style={S.error}>{error}</div>}
           {loading && <div style={S.loading}>Loading book...</div>}
+
+          {/* Text search results */}
+          {textSearchResults !== null && (
+            <div style={{ marginBottom: '20px', padding: '10px', backgroundColor: '#faf0dc', border: '1px solid #c4a77d', borderRadius: '4px' }}>
+              <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#8b4513', marginBottom: '6px' }}>
+                Search results for "{textSearchQ}"
+                <span
+                  style={{ marginLeft: '10px', cursor: 'pointer', color: '#8b7355', fontWeight: 'normal', fontSize: '12px' }}
+                  onClick={() => setTextSearchResults(null)}
+                >
+                  {'\u2715'} Clear
+                </span>
+              </div>
+              {textSearchResults.length === 0 ? (
+                <div style={{ color: '#8b7355', fontStyle: 'italic', fontSize: '13px' }}>No results found.</div>
+              ) : (
+                textSearchResults.slice(0, 20).map((r, i) => (
+                  <div key={i} style={{ padding: '6px 0', borderBottom: '1px solid #e0d0b0', cursor: 'pointer' }}>
+                    <div style={{ fontSize: '11px', color: '#6b4c2a', fontStyle: 'italic' }}>
+                      {r.chapter_title || `Chapter ${r.chapter_number}`}
+                    </div>
+                    <div style={{ fontSize: '14px', color: '#2c1810', lineHeight: '1.5' }}
+                      dangerouslySetInnerHTML={{
+                        __html: r.text.substring(0, 200).replace(
+                          new RegExp(`(${textSearchQ.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'),
+                          '<mark style="background-color:#f7d44a;color:#2c1810;padding:0 2px;border-radius:2px">$1</mark>'
+                        )
+                      }}
+                    />
+                  </div>
+                ))
+              )}
+              {textSearchResults.length > 20 && (
+                <div style={{ fontSize: '12px', color: '#8b7355', marginTop: '6px' }}>
+                  Showing 20 of {textSearchResults.length} results.
+                </div>
+              )}
+            </div>
+          )}
 
           {book?.chapters?.map((ch: ChapterData, ci: number) => (
             <div key={ci} style={S.chapter}>
@@ -360,7 +651,7 @@ export default function ReaderPage() {
                     Analysis
                   </div>
                   {popup.parses.map((p, i) => (
-                    <ParseResultCard key={i} result={p} />
+                    <ParseResultCard key={i} result={p} onInflect={handleInflect} />
                   ))}
                 </>
               )}
@@ -374,7 +665,19 @@ export default function ReaderPage() {
                   ))}
                 </>
               )}
-              {popup.parses.length === 0 && popup.dict.length === 0 && (
+              {popup.suggestions && popup.suggestions.length > 0 && (
+                <>
+                  <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b7355', marginTop: '8px', marginBottom: '4px' }}>
+                    Did you mean?
+                  </div>
+                  {popup.suggestions.map((s, i) => (
+                    <div key={i} style={{ fontSize: '13px', color: '#c4a77d', padding: '2px 0', borderBottom: '1px solid #5a3d2b' }}>
+                      {s}
+                    </div>
+                  ))}
+                </>
+              )}
+              {popup.parses.length === 0 && popup.dict.length === 0 && (!popup.suggestions || popup.suggestions.length === 0) && (
                 <div style={{ color: '#8b7355', fontStyle: 'italic', fontSize: '13px' }}>
                   No analysis found.
                 </div>
@@ -393,6 +696,42 @@ export default function ReaderPage() {
                   <b>Participle:</b> PPL=Participle, SUP=Supine, GER=Gerund
                 </div>
               </details>
+
+              {/* Inflection table */}
+              {inflectTable && (
+                <div style={{ marginTop: '12px', borderTop: '2px solid #8b4513', paddingTop: '8px' }}>
+                  <div style={{ fontWeight: 'bold', fontSize: '13px', color: '#d4a76a', marginBottom: '6px' }}>
+                    {'\uD83D\uDCCA'} Inflection: {inflectTable.lemma}
+                    <span
+                      style={{ marginLeft: '8px', cursor: 'pointer', color: '#8b7355', fontSize: '11px', fontWeight: 'normal' }}
+                      onClick={() => setInflectTable(null)}
+                    >
+                      {'\u2715'} Close
+                    </span>
+                  </div>
+                  {inflectTable.table ? (
+                    Object.entries(inflectTable.table).map(([section, rows]) => (
+                      <div key={section} style={{ marginBottom: '8px' }}>
+                        <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#8b7355', marginBottom: '2px' }}>
+                          {section}
+                        </div>
+                        {rows.map((row, ri) => (
+                          <div key={ri} style={{ fontSize: '12px', color: '#c4a77d', padding: '1px 0', display: 'flex', gap: '8px' }}>
+                            <span style={{ color: '#8b7355', minWidth: '80px' }}>
+                              {row.case || row.person || ''} {row.number || ''}
+                            </span>
+                            <span style={{ color: '#e8d5b0' }}>{row.form}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ))
+                  ) : (
+                    <div style={{ color: '#8b7355', fontStyle: 'italic', fontSize: '12px' }}>
+                      {inflecting === inflectTable.lemma ? 'Loading...' : 'No inflection table available.'}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
           {!popup && !loading && (
@@ -416,6 +755,27 @@ export default function ReaderPage() {
           <span style={S.pageInfo}>
             Page {pagination.page} of {pagination.total_pages}
           </span>
+          <input
+            type="number"
+            min={1}
+            max={pagination.total_pages}
+            value={pagination.page}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10);
+              if (v >= 1 && v <= pagination.total_pages) setPage(v);
+            }}
+            style={{
+              width: '60px',
+              padding: '4px 8px',
+              borderRadius: '3px',
+              border: '1px solid #8b4513',
+              backgroundColor: '#faf0dc',
+              color: '#2c1810',
+              fontSize: '13px',
+              fontFamily: 'Georgia, serif',
+              textAlign: 'center',
+            }}
+          />
           <button
             style={pagination.has_next ? S.pageBtn : S.pageBtnDisabled}
             disabled={!pagination.has_next}

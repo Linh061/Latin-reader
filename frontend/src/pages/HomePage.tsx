@@ -146,41 +146,6 @@ const S: Record<string, React.CSSProperties> = {
     color: '#2c1810',
     outline: 'none',
   },
-  searchBtn: {
-    padding: '8px 16px',
-    border: '1px solid #8b4513',
-    borderRadius: '4px',
-    backgroundColor: '#5a3d2b',
-    color: '#e8d5b0',
-    cursor: 'pointer',
-    fontFamily: 'Georgia, serif',
-    fontSize: '13px',
-  },
-  searchResults: {
-    width: '100%',
-    maxWidth: '800px',
-    marginTop: '16px',
-    marginBottom: '20px',
-  },
-  searchResultItem: {
-    padding: '10px 14px',
-    marginBottom: '6px',
-    backgroundColor: '#faf0dc',
-    border: '1px solid #c4a77d',
-    borderRadius: '4px',
-    cursor: 'pointer',
-  },
-  searchResultMeta: {
-    fontSize: '12px',
-    color: '#6b4c2a',
-    fontStyle: 'italic',
-    marginBottom: '2px',
-  },
-  searchResultText: {
-    fontSize: '14px',
-    color: '#2c1810',
-    lineHeight: '1.5',
-  },
 };
 
 /** Render text with matched search term highlighted (returns HTML string). */
@@ -200,22 +165,11 @@ interface BookMeta {
   book_count: number;
 }
 
-interface SearchResult {
-  book_id: string;
-  book_title: string;
-  chapter_number: number;
-  chapter_title: string;
-  text: string;
-  match_index: number;
-}
-
 export default function HomePage() {
   const navigate = useNavigate();
   const [books, setBooks] = useState<BookMeta[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQ, setSearchQ] = useState('');
-  const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
-  const [searching, setSearching] = useState(false);
 
   useEffect(() => {
     fetch(`${API}/api/books`)
@@ -225,21 +179,13 @@ export default function HomePage() {
       .finally(() => setLoading(false));
   }, []);
 
-  const doSearch = async () => {
-    const q = searchQ.trim();
-    if (!q) return;
-    setSearching(true);
-    setSearchResults(null);
-    try {
-      const res = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}`);
-      const data = await res.json();
-      setSearchResults(data.results || []);
-    } catch {
-      setSearchResults([]);
-    } finally {
-      setSearching(false);
-    }
-  };
+  // Filter books by title/author (client-side)
+  const filteredBooks = searchQ.trim()
+    ? books.filter(b => {
+        const q = searchQ.toLowerCase();
+        return b.title.toLowerCase().includes(q) || b.author.toLowerCase().includes(q);
+      })
+    : books;
 
   return (
     <div style={S.container}>
@@ -255,14 +201,10 @@ export default function HomePage() {
       <nav style={S.nav}>
         <input
           style={S.searchInput}
-          placeholder="Search Latin text…"
+          placeholder="Search books by title or author…"
           value={searchQ}
           onChange={e => setSearchQ(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && doSearch()}
         />
-        <button style={S.searchBtn} onClick={doSearch} disabled={searching}>
-          {searching ? '…' : 'Search'}
-        </button>
         <button style={S.navBtn} onClick={() => navigate('/ocr')}>
           Image OCR
         </button>
@@ -273,64 +215,42 @@ export default function HomePage() {
 
       {/* Main */}
       <div style={S.main}>
-        {/* Search results */}
-        {searchResults !== null && (
-          <div style={S.searchResults}>
-            <div style={{ fontSize: '14px', color: '#6b4c2a', marginBottom: '8px' }}>
-              {searchResults.length === 0
-                ? 'No results found.'
-                : `${searchResults.length} result(s) found.`}
-            </div>
-            {searchResults.slice(0, 20).map((r, i) => (
-              <div
-                key={i}
-                style={S.searchResultItem}
-                onClick={() => navigate(`/reader/${r.book_id}`)}
-              >
-                <div style={S.searchResultMeta}>
-                  {r.book_title} &middot; {r.chapter_title || `Chapter ${r.chapter_number}`}
-                </div>
-                <div style={S.searchResultText} dangerouslySetInnerHTML={{ __html: highlightText(r.text.substring(0, 200), searchQ) }} />
-              </div>
-            ))}
+        <div style={S.sectionTitle}>{'\uD83D\uDCD6'} Books</div>
+
+        {loading && <div style={S.loading}>Loading books...</div>}
+
+        {searchQ.trim() && filteredBooks.length === 0 && !loading && (
+          <div style={{ color: '#8b7355', fontStyle: 'italic', padding: '10px', marginBottom: '16px' }}>
+            No books match "{searchQ}".
           </div>
         )}
 
-        {/* Search hint / books when no search */}
-        {searchResults === null && (
-          <>
-            <div style={S.sectionTitle}>{'\uD83D\uDCD6'} Books</div>
-
-            {loading && <div style={S.loading}>Loading books...</div>}
-
-            <div style={S.bookGrid}>
-              {books.map(book => (
-                <div
-                  key={book.id}
-                  style={S.bookCard}
-                  onClick={() => navigate(`/reader/${book.id}`)}
-                >
-                  <div style={S.bookTitle}>{book.title}</div>
-                  <div style={S.bookAuthor}>{book.author}</div>
-                  <div style={S.bookDesc}>
-                    {book.book_count} books &middot; Click any word to analyze
-                  </div>
-                  <div style={S.readBtn}>Read</div>
-                </div>
-              ))}
-            </div>
-
-            {!loading && books.length === 0 && (
-              <div style={{ color: '#8b7355', fontStyle: 'italic', padding: '20px' }}>
-                No books available.
+        <div style={S.bookGrid}>
+          {filteredBooks.map(book => (
+            <div
+              key={book.id}
+              style={S.bookCard}
+              onClick={() => navigate(`/reader/${book.id}`)}
+            >
+              <div style={S.bookTitle} dangerouslySetInnerHTML={{ __html: highlightText(book.title, searchQ) }} />
+              <div style={S.bookAuthor} dangerouslySetInnerHTML={{ __html: highlightText(book.author, searchQ) }} />
+              <div style={S.bookDesc}>
+                {book.book_count} books &middot; Click any word to analyze
               </div>
-            )}
-
-            <div style={S.hint}>
-              Click any Latin word in a book to see its grammar and dictionary entry.
+              <div style={S.readBtn}>Read</div>
             </div>
-          </>
+          ))}
+        </div>
+
+        {!loading && books.length === 0 && (
+          <div style={{ color: '#8b7355', fontStyle: 'italic', padding: '20px' }}>
+            No books available.
+          </div>
         )}
+
+        <div style={S.hint}>
+          Click any Latin word in a book to see its grammar and dictionary entry.
+        </div>
       </div>
 
       {/* Footer */}

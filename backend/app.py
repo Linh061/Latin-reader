@@ -9,6 +9,7 @@ Provides API endpoints for:
 """
 
 import os
+import re
 import sys
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -16,8 +17,8 @@ from flask_cors import CORS
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from engine.lemmatizer import get_lemmatizer, lemmatize
-from engine.dictionary import get_dictionary, lookup
+from engine.lemmatizer import get_lemmatizer, lemmatize, fuzzy_search, prefix_search
+from engine.dictionary import get_dictionary, lookup, reverse_lookup
 from engine.inflection import generate_table
 from engine.ocr import ocr_image, ocr_image_with_analysis
 from engine.pdf_ocr import get_pdf_processor
@@ -179,6 +180,92 @@ def analyze_word():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/fuzzy", methods=["POST"])
+def fuzzy():
+    """
+    Fuzzy search for a Latin word form.
+
+    Tries exact match first, then phonetic Levenshtein (distance ≤ 2),
+    then prefix match.
+
+    Request JSON:
+        word: str - The Latin word to search for
+        max_distance: int (optional) - Levenshtein distance threshold (default 2)
+        max_results: int (optional) - Max results (default 10)
+
+    Returns:
+        query: the original query
+        exact: list of exact parse results (same as /api/analyze)
+        fuzzy: list of fuzzy match candidates {form, lemma, part_of_speech, meaning, distance}
+        prefix: list of prefix match candidates {form, lemma, part_of_speech, meaning}
+    """
+    data = request.get_json()
+    if not data or "word" not in data:
+        return jsonify({"error": "Missing 'word' parameter"}), 400
+
+    word = data["word"].strip()
+    if not word:
+        return jsonify({"error": "Empty word"}), 400
+
+    max_distance = data.get("max_distance", 2)
+    max_results = data.get("max_results", 10)
+
+    try:
+        # 1. Exact match
+        exact = lemmatize(word)
+
+        # 2. Fuzzy (phonetic Levenshtein)
+        fuzzy = fuzzy_search(word, max_distance, max_results) if not exact else []
+
+        # 3. Prefix match
+        prefix = prefix_search(word, max_results) if not exact and not fuzzy else []
+
+        return jsonify({
+            "query": word,
+            "exact": exact,
+            "fuzzy": fuzzy,
+            "prefix": prefix,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/reverse", methods=["POST"])
+def reverse_dict():
+    """
+    English → Latin reverse lookup.
+
+    Searches lemmas by English meaning (LIKE match).
+
+    Request JSON:
+        word: str - The English word to search for
+        max_results: int (optional) - Max results (default 30)
+
+    Returns:
+        query: the original English query
+        results: list of {key, part_of_speech, meaning}
+    """
+    data = request.get_json()
+    if not data or "word" not in data:
+        return jsonify({"error": "Missing 'word' parameter"}), 400
+
+    word = data["word"].strip()
+    if not word:
+        return jsonify({"error": "Empty word"}), 400
+
+    max_results = data.get("max_results", 30)
+
+    try:
+        results = reverse_lookup(word, max_results)
+        return jsonify({
+            "query": word,
+            "results": results,
+            "count": len(results),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ── OCR ─────────────────────────────────────────────────────────────────────
 
 import base64
@@ -323,15 +410,21 @@ def book_content(book_id: str):
         per_page = request.args.get("per_page", type=int, default=0)
 
         if per_page > 0 and page > 0:
-            # Flatten all paragraphs across chapters with chapter context
+            # Split paragraphs into smaller lines (sentences/clauses)
+            # so each page fits within one screen.
             all_items: list[dict] = []
             for ch in result["chapters"]:
                 for para in ch["paragraphs"]:
-                    all_items.append({
-                        "chapter_number": ch["number"],
-                        "chapter_title": ch["title"],
-                        "text": para,
-                    })
+                    # Split on sentence-ending punctuation, keep delimiter
+                    lines = re.split(r'(?<=[.;!?])\s+', para)
+                    for line in lines:
+                        line = line.strip()
+                        if line:
+                            all_items.append({
+                                "chapter_number": ch["number"],
+                                "chapter_title": ch["title"],
+                                "text": line,
+                            })
 
             total_items = len(all_items)
             total_pages = max(1, (total_items + per_page - 1) // per_page)
@@ -513,6 +606,28 @@ def pdf_page(pdf_id: str, page_num: int):
         result = proc.get_page_display(pdf_id, page_num, model_type)
         if "error" in result:
             return jsonify(result), 404 if "not found" in result.get("error", "") else 400
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pdf/<pdf_id>/page/<int:page_num>/re-ocr", methods=["POST"])
+def pdf_page_re_ocr(pdf_id: str, page_num: int):
+    """
+    Re-run OCR on a page (delete cache + re-OCR synchronously).
+
+    Query params:
+        model_type: "print" or "manuscript" (default "print")
+
+    Returns:
+        Same as GET /api/pdf/<id>/page/<n>
+    """
+    model_type = request.args.get("model_type", "print")
+    try:
+        proc = get_pdf_processor()
+        result = proc.re_ocr_page(pdf_id, page_num, model_type)
+        if "error" in result:
+            return jsonify(result), 400
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

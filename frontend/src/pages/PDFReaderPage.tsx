@@ -1,6 +1,6 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import type { PdfPageResponse, ParseResult, DictEntry, BookshelfBook } from '../types/latin';
+import type { PdfPageResponse, ParseResult, DictEntry, BookshelfBook, InflectResponse } from '../types/latin';
 
 const API = '';
 
@@ -313,6 +313,7 @@ export default function PDFReaderPage() {
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState('');
   const [saving, setSaving] = useState(false);
+  const [reOcring, setReOcring] = useState(false);
 
   const [searchWord, setSearchWord] = useState('');
   const [searchingWord, setSearchingWord] = useState(false);
@@ -323,8 +324,18 @@ export default function PDFReaderPage() {
     y: number;
     parses: ParseResult[];
     dict: DictEntry[];
+    suggestions?: string[];
   } | null>(null);
   const popupRef = useRef<HTMLDivElement>(null);
+
+  // Inflection table state
+  const [inflectTable, setInflectTable] = useState<{ lemma: string; table: InflectResponse['table'] } | null>(null);
+  const [inflecting, setInflecting] = useState<string | null>(null);
+
+  // Popup-internal search state
+  const [popupSearchWord, setPopupSearchWord] = useState('');
+  const [popupSearching, setPopupSearching] = useState(false);
+  const [popupReverseMode, setPopupReverseMode] = useState(false); // false=Latin→Eng, true=Eng→Latin
 
   // Load bookshelf on mount
   useEffect(() => {
@@ -343,14 +354,20 @@ export default function PDFReaderPage() {
     }
   }, [routePdfId]);
 
-  // Fetch page data
+  // ── Race-condition-safe page loading ──────────────────────────────
+  // pageToken increments on every page change; stale responses are ignored.
+  const pageTokenRef = useRef(0);
+  const pollAbortRef = useRef<AbortController | null>(null);
+
   const fetchPage = useCallback(async (pid: string, pn: number, mt: string) => {
+    const token = ++pageTokenRef.current;
     setLoading(true);
     setError(null);
-    setPopup(null);  // close floating popup on page change, but keep wordAnalysis
+    setPopup(null);
     try {
       const res = await fetch(`${API}/api/pdf/${pid}/page/${pn}?model_type=${mt}`);
       const data: PdfPageResponse = await res.json();
+      if (token !== pageTokenRef.current) return; // stale
       if (data.error) {
         setError(data.error);
       } else {
@@ -358,19 +375,28 @@ export default function PDFReaderPage() {
         setTotalPages(data.total_pages);
       }
     } catch (err: any) {
+      if (token !== pageTokenRef.current) return;
       setError(`Failed to load page: ${err.message}`);
     } finally {
-      setLoading(false);
+      if (token === pageTokenRef.current) setLoading(false);
     }
   }, []);
 
-  // Poll OCR text after page image is shown
+  // Poll OCR text — aborted on page change
   const pollOcr = useCallback(async (pid: string, pn: number, mt: string) => {
+    // Abort any previous poll
+    if (pollAbortRef.current) pollAbortRef.current.abort();
+    const ac = new AbortController();
+    pollAbortRef.current = ac;
+
+    const token = pageTokenRef.current;
     for (let attempt = 0; attempt < 60; attempt++) {
       await new Promise(r => setTimeout(r, 2000));
+      if (ac.signal.aborted || token !== pageTokenRef.current) return;
       try {
         const res = await fetch(`${API}/api/pdf/${pid}/page/${pn}/ocr?model_type=${mt}`);
         const data = await res.json();
+        if (ac.signal.aborted || token !== pageTokenRef.current) return;
         if (data.ocr_text || data.lines?.length > 0) {
           setPageData(prev => prev ? { ...prev, ocr_text: data.ocr_text, lines: data.lines, ocr_pending: false } : prev);
           return;
@@ -386,6 +412,10 @@ export default function PDFReaderPage() {
     if (currentPdfId && pageNum > 0 && (totalPages === 0 || pageNum <= totalPages)) {
       fetchPage(currentPdfId, pageNum, modelType);
     }
+    // Cleanup: abort poll on unmount / page change
+    return () => {
+      if (pollAbortRef.current) pollAbortRef.current.abort();
+    };
   }, [currentPdfId, pageNum, modelType, fetchPage, totalPages]);
 
   // Start OCR polling when page image is loaded but text is pending
@@ -447,32 +477,67 @@ export default function PDFReaderPage() {
     }
   }, []);
 
-  // Search word from nav bar
+  // Search word from nav bar (with fuzzy fallback)
   const handleSearchWord = useCallback(async () => {
     const word = searchWord.trim();
     if (!word) return;
     setSearchingWord(true);
     setPopup(null);
     try {
-      const res = await fetch(`${API}/api/analyze`, {
+      const res = await fetch(`${API}/api/fuzzy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ word }),
       });
       const data = await res.json();
-      const allDict: DictEntry[] = [];
-      if (data.dictionary) {
-        for (const entries of Object.values(data.dictionary) as any) {
-          allDict.push(...(entries as DictEntry[]));
+
+      if (data.exact && data.exact.length > 0) {
+        // Exact match — show analysis
+        const allDict: DictEntry[] = [];
+        for (const pr of data.exact) {
+          const dRes = await fetch(`${API}/api/dict`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: pr.lemma }),
+          });
+          const dData = await dRes.json();
+          if (dData.results) allDict.push(...dData.results);
         }
+        setPopup({
+          word,
+          x: 60,
+          y: 120,
+          parses: data.exact,
+          dict: allDict,
+        });
+      } else if (data.fuzzy && data.fuzzy.length > 0) {
+        setPopup({
+          word,
+          x: 60,
+          y: 120,
+          parses: [],
+          dict: [],
+          suggestions: data.fuzzy.map((f: any) => `${f.form} (${f.lemma}, ${f.part_of_speech})`),
+        });
+      } else if (data.prefix && data.prefix.length > 0) {
+        setPopup({
+          word,
+          x: 60,
+          y: 120,
+          parses: [],
+          dict: [],
+          suggestions: data.prefix.map((f: any) => `${f.form} (${f.lemma}, ${f.part_of_speech})`),
+        });
+      } else {
+        setPopup({
+          word,
+          x: 60,
+          y: 120,
+          parses: [],
+          dict: [],
+          suggestions: [],
+        });
       }
-      setPopup({
-        word,
-        x: 60,
-        y: 120,
-        parses: data.parses || [],
-        dict: allDict,
-      });
     } catch (err: any) {
       setError(`Search failed: ${err.message}`);
     } finally {
@@ -523,6 +588,114 @@ export default function PDFReaderPage() {
       setError(`Analysis failed: ${err.message}`);
     }
   }, [currentPdfId, pageNum]);
+
+  // Fetch inflection table for a lemma
+  const handleInflect = useCallback(async (lemma: string) => {
+    setInflecting(lemma);
+    setInflectTable(null);
+    try {
+      const res = await fetch(`${API}/api/inflect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lemma }),
+      });
+      const data: InflectResponse = await res.json();
+      if (data.table) {
+        setInflectTable({ lemma, table: data.table });
+      } else {
+        setInflectTable({ lemma, table: null });
+      }
+    } catch {
+      setInflectTable({ lemma, table: null });
+    } finally {
+      setInflecting(null);
+    }
+  }, []);
+
+  // Search from within the popup (Latin fuzzy or English reverse)
+  const handlePopupSearch = useCallback(async () => {
+    const word = popupSearchWord.trim();
+    if (!word) return;
+    setPopupSearching(true);
+    try {
+      if (popupReverseMode) {
+        // English → Latin reverse lookup
+        const res = await fetch(`${API}/api/reverse`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ word }),
+        });
+        const data = await res.json();
+        setPopup(prev => prev ? {
+          ...prev,
+          word,
+          parses: [],
+          dict: (data.results || []).map((r: any) => ({
+            key: r.key,
+            part_of_speech: r.part_of_speech,
+            meaning: r.meaning,
+          })),
+          suggestions: undefined,
+        } : null);
+      } else {
+        // Latin → English fuzzy search
+        const res = await fetch(`${API}/api/fuzzy`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ word }),
+        });
+        const data = await res.json();
+
+        if (data.exact && data.exact.length > 0) {
+          const allDict: DictEntry[] = [];
+          for (const pr of data.exact) {
+            const dRes = await fetch(`${API}/api/dict`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ key: pr.lemma }),
+            });
+            const dData = await dRes.json();
+            if (dData.results) allDict.push(...dData.results);
+          }
+          setPopup(prev => prev ? {
+            ...prev,
+            word,
+            parses: data.exact,
+            dict: allDict,
+            suggestions: undefined,
+          } : null);
+        } else if (data.fuzzy && data.fuzzy.length > 0) {
+          setPopup(prev => prev ? {
+            ...prev,
+            word,
+            parses: [],
+            dict: [],
+            suggestions: data.fuzzy.map((f: any) => `${f.form} (${f.lemma}, ${f.part_of_speech})`),
+          } : null);
+        } else if (data.prefix && data.prefix.length > 0) {
+          setPopup(prev => prev ? {
+            ...prev,
+            word,
+            parses: [],
+            dict: [],
+            suggestions: data.prefix.map((f: any) => `${f.form} (${f.lemma}, ${f.part_of_speech})`),
+          } : null);
+        } else {
+          setPopup(prev => prev ? {
+            ...prev,
+            word,
+            parses: [],
+            dict: [],
+            suggestions: [],
+          } : null);
+        }
+      }
+    } catch {
+      // ignore
+    } finally {
+      setPopupSearching(false);
+    }
+  }, [popupSearchWord, popupReverseMode]);
 
   // Close popup on background click
   useEffect(() => {
@@ -742,6 +915,26 @@ export default function PDFReaderPage() {
               Latin Text {pageData?.user_edited ? '(\u270F Edited)' : ''}
             </span>
             <div style={{ display: 'flex', gap: '6px' }}>
+              {/* Re-OCR button */}
+              <button
+                onClick={async () => {
+                  setReOcring(true);
+                  try {
+                    const res = await fetch(`${API}/api/pdf/${currentPdfId}/page/${pageNum}/re-ocr?model_type=${modelType}`, { method: 'POST' });
+                    const data = await res.json();
+                    if (!data.error) {
+                      setPageData(data);
+                    }
+                  } catch {
+                    // ignore
+                  }
+                  setReOcring(false);
+                }}
+                disabled={reOcring}
+                style={{ padding: '3px 10px', fontSize: '11px', border: '1px solid #8b4513', borderRadius: '3px', backgroundColor: '#5a3d2b', color: '#e8d5b0', cursor: 'pointer', fontFamily: 'Georgia, serif' }}
+              >
+                {reOcring ? '\u2026' : '\uD83D\uDD04'} Re-OCR
+              </button>
               {!isEditing ? (
                 <button
                   onClick={() => { setEditText(pageData?.ocr_text || ''); setIsEditing(true); }}
@@ -808,6 +1001,47 @@ export default function PDFReaderPage() {
 
         {/* Right: PDF image */}
         <div style={S.rightPanel}>
+          {/* Page jump above the image */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', width: '100%', justifyContent: 'center' }}>
+            <button
+              style={pageNum <= 1 ? S.pageBtnDisabled : S.pageBtn}
+              disabled={pageNum <= 1}
+              onClick={() => goToPage(pageNum - 1)}
+            >
+              {'\u25C0'} Prev
+            </button>
+            <input
+              type="number"
+              min={1}
+              max={totalPages}
+              value={pageNum}
+              onChange={(e) => {
+                const v = parseInt(e.target.value, 10);
+                if (v >= 1 && v <= totalPages) goToPage(v);
+              }}
+              style={{
+                width: '60px',
+                padding: '4px 8px',
+                borderRadius: '3px',
+                border: '1px solid #8b4513',
+                backgroundColor: '#faf0dc',
+                color: '#2c1810',
+                fontSize: '13px',
+                fontFamily: 'Georgia, serif',
+                textAlign: 'center',
+              }}
+            />
+            <span style={{ color: '#d4a76a', fontSize: '13px', fontFamily: 'Georgia, serif' }}>
+              / {totalPages}
+            </span>
+            <button
+              style={pageNum >= totalPages ? S.pageBtnDisabled : S.pageBtn}
+              disabled={pageNum >= totalPages}
+              onClick={() => goToPage(pageNum + 1)}
+            >
+              Next {'\u25B6'}
+            </button>
+          </div>
           {pageData?.page_img && (
             <img
               src={`data:image/png;base64,${pageData.page_img}`}
@@ -818,47 +1052,11 @@ export default function PDFReaderPage() {
         </div>
       </div>
 
-      {/* Page navigation */}
+      {/* Page navigation (bottom) */}
       <div style={S.pageNav}>
-        <button
-          style={pageNum <= 1 ? S.pageBtnDisabled : S.pageBtn}
-          disabled={pageNum <= 1}
-          onClick={() => goToPage(pageNum - 1)}
-        >
-          {'\u25C0'} Prev
-        </button>
         <span style={S.pageInfo}>
           Page {pageNum} / {totalPages}
         </span>
-        <button
-          style={pageNum >= totalPages ? S.pageBtnDisabled : S.pageBtn}
-          disabled={pageNum >= totalPages}
-          onClick={() => goToPage(pageNum + 1)}
-        >
-          Next {'\u25B6'}
-        </button>
-
-        <input
-          type="number"
-          min={1}
-          max={totalPages}
-          value={pageNum}
-          onChange={(e) => {
-            const v = parseInt(e.target.value, 10);
-            if (v >= 1 && v <= totalPages) goToPage(v);
-          }}
-          style={{
-            width: '60px',
-            padding: '4px 8px',
-            borderRadius: '3px',
-            border: '1px solid #8b4513',
-            backgroundColor: '#faf0dc',
-            color: '#2c1810',
-            fontSize: '13px',
-            fontFamily: 'Georgia, serif',
-            textAlign: 'center',
-          }}
-        />
       </div>
 
       {/* Word analysis popup */}
@@ -874,6 +1072,62 @@ export default function PDFReaderPage() {
           <div style={{ fontWeight: 'bold', fontSize: '16px', color: '#2c1810', marginBottom: '4px', borderBottom: '1px solid #c4a77d', paddingBottom: '4px' }}>
             {popup.word}
           </div>
+
+          {/* Popup-internal search bar */}
+          <div style={{ display: 'flex', gap: '4px', marginBottom: '8px', alignItems: 'center' }}>
+            <input
+              value={popupSearchWord}
+              onChange={e => setPopupSearchWord(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handlePopupSearch(); }}
+              placeholder={popupReverseMode ? 'Search English word…' : 'Search Latin word…'}
+              style={{
+                flex: 1,
+                padding: '4px 8px',
+                borderRadius: '3px',
+                border: '1px solid #8b4513',
+                backgroundColor: '#fff8ee',
+                color: '#2c1810',
+                fontSize: '12px',
+                fontFamily: 'Georgia, serif',
+                outline: 'none',
+              }}
+            />
+            <button
+              onClick={() => setPopupReverseMode(m => !m)}
+              title={popupReverseMode ? 'Switch to Latin→English' : 'Switch to English→Latin'}
+              style={{
+                padding: '3px 6px',
+                borderRadius: '3px',
+                border: '1px solid #8b4513',
+                backgroundColor: popupReverseMode ? '#2d5a2e' : '#5a3d2b',
+                color: '#e8d5b0',
+                cursor: 'pointer',
+                fontSize: '10px',
+                fontFamily: 'Georgia, serif',
+                fontWeight: 'bold',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {popupReverseMode ? 'Eng→Lat' : 'Lat→Eng'}
+            </button>
+            <button
+              onClick={handlePopupSearch}
+              disabled={popupSearching}
+              style={{
+                padding: '3px 8px',
+                borderRadius: '3px',
+                border: '1px solid #8b4513',
+                backgroundColor: '#5a3d2b',
+                color: '#e8d5b0',
+                cursor: 'pointer',
+                fontSize: '11px',
+                fontFamily: 'Georgia, serif',
+              }}
+            >
+              {popupSearching ? '\u2026' : '\uD83D\uDD0D'}
+            </button>
+          </div>
+
           {popup.parses.length > 0 && (
             <div style={{ marginBottom: '6px' }}>
               <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b4513', marginBottom: '4px' }}>
@@ -881,7 +1135,25 @@ export default function PDFReaderPage() {
               </div>
               {popup.parses.map((p, i) => (
                 <div key={i} style={S.resultCard}>
-                  <div style={S.resultLemma}>{p.lemma_form}</div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={S.resultLemma}>{p.lemma_form}</div>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleInflect(p.lemma); }}
+                      title="Show inflection table"
+                      style={{
+                        padding: '1px 6px',
+                        fontSize: '10px',
+                        border: '1px solid #8b4513',
+                        borderRadius: '3px',
+                        backgroundColor: '#5a3d2b',
+                        color: '#e8d5b0',
+                        cursor: 'pointer',
+                        fontFamily: 'Georgia, serif',
+                      }}
+                    >
+                      {'\uD83D\uDCCA'} Inflect
+                    </button>
+                  </div>
                   <div style={S.resultPos}>{p.part_of_speech}</div>
                   {p.morphology && (
                     <div style={S.resultMorph}>{_morphologyLabel(p.morphology)}</div>
@@ -907,7 +1179,19 @@ export default function PDFReaderPage() {
               ))}
             </div>
           )}
-          {popup.parses.length === 0 && popup.dict.length === 0 && (
+          {popup.suggestions && popup.suggestions.length > 0 && (
+            <div style={{ marginBottom: '6px' }}>
+              <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b4513', marginBottom: '4px' }}>
+                Did you mean?
+              </div>
+              {popup.suggestions.map((s, i) => (
+                <div key={i} style={{ fontSize: '13px', color: '#6b4c2a', padding: '2px 0', borderBottom: '1px solid #c4a77d' }}>
+                  {s}
+                </div>
+              ))}
+            </div>
+          )}
+          {popup.parses.length === 0 && popup.dict.length === 0 && (!popup.suggestions || popup.suggestions.length === 0) && (
             <div style={{ color: '#8b7355', fontSize: '13px', fontStyle: 'italic' }}>No analysis found.</div>
           )}
           {/* Morphology legend */}
@@ -924,6 +1208,42 @@ export default function PDFReaderPage() {
               <b>Participle:</b> PPL=Participle, SUP=Supine, GER=Gerund
             </div>
           </details>
+
+          {/* Inflection table */}
+          {inflectTable && (
+            <div style={{ marginTop: '12px', borderTop: '2px solid #8b4513', paddingTop: '8px' }}>
+              <div style={{ fontWeight: 'bold', fontSize: '13px', color: '#3e2c1a', marginBottom: '6px' }}>
+                {'\uD83D\uDCCA'} Inflection: {inflectTable.lemma}
+                <span
+                  style={{ marginLeft: '8px', cursor: 'pointer', color: '#8b7355', fontSize: '11px', fontWeight: 'normal' }}
+                  onClick={() => setInflectTable(null)}
+                >
+                  {'\u2715'} Close
+                </span>
+              </div>
+              {inflectTable.table ? (
+                Object.entries(inflectTable.table).map(([section, rows]) => (
+                  <div key={section} style={{ marginBottom: '8px' }}>
+                    <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#8b7355', marginBottom: '2px' }}>
+                      {section}
+                    </div>
+                    {rows.map((row, ri) => (
+                      <div key={ri} style={{ fontSize: '12px', color: '#6b4c2a', padding: '1px 0', display: 'flex', gap: '8px' }}>
+                        <span style={{ color: '#8b7355', minWidth: '80px' }}>
+                          {row.case || row.person || ''} {row.number || ''}
+                        </span>
+                        <span style={{ color: '#2c1810' }}>{row.form}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))
+              ) : (
+                <div style={{ color: '#8b7355', fontStyle: 'italic', fontSize: '12px' }}>
+                  {inflecting === inflectTable.lemma ? 'Loading...' : 'No inflection table available.'}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

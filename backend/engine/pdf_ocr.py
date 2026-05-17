@@ -64,7 +64,7 @@ def _ensure_book_dirs(title: str) -> tuple[str, str, str]:
 
 
 def _init_cache_db(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ocr_cache (
             cache_key TEXT PRIMARY KEY,
@@ -407,6 +407,80 @@ class PDFProcessor:
         except Exception:
             return None
 
+    # ── Re-OCR (force re-run) ────────────────────────────────────────
+
+    def re_ocr_page(self, pdf_id: str, page_num: int, model_type: str = "print") -> dict:
+        """Delete cached OCR for a page and re-run OCR immediately.
+        Returns the new page data (image + OCR text).
+        """
+        pdf_path, total_pages, title, db_path = self._find_pdf(pdf_id)
+        if pdf_path is None:
+            return {"error": "PDF not found"}
+
+        cache_key = f"{pdf_id}_p{page_num:04d}_{model_type}"
+
+        # Remove from memory cache
+        self._in_memory.pop(cache_key, None)
+
+        # Remove from SQLite cache
+        if db_path:
+            conn = self._get_conn(db_path)
+            conn.execute("DELETE FROM ocr_cache WHERE cache_key = ?", (cache_key,))
+            conn.commit()
+
+        # Re-run OCR synchronously
+        try:
+            import fitz
+            doc = fitz.open(pdf_path)
+            page = doc.load_page(page_num - 1)
+            dpi = 600
+            pix = page.get_pixmap(dpi=dpi)
+            img_bytes = pix.tobytes("png")
+            page_b64 = base64.b64encode(img_bytes).decode("ascii")
+            doc.close()
+
+            ocr_result = self._ocr_bytes(img_bytes, model_type)
+
+            cache_data = {
+                "page_img": page_b64,
+                "ocr_text": ocr_result.get("full_text", ""),
+                "lines": ocr_result.get("lines", []),
+            }
+
+            if db_path:
+                own_conn = sqlite3.connect(db_path)
+                own_conn.execute(
+                    "INSERT OR REPLACE INTO ocr_cache (cache_key, data, created_at) VALUES (?, ?, ?)",
+                    (cache_key, json.dumps(cache_data, ensure_ascii=False), int(time.time())),
+                )
+                own_conn.commit()
+                own_conn.close()
+
+            # Check for user-edited text
+            user_edited = False
+            if db_path:
+                page_key = f"{pdf_id}_p{page_num:04d}_edited"
+                conn = self._get_conn(db_path)
+                cur = conn.execute("SELECT text FROM page_text WHERE page_key = ?", (page_key,))
+                row = cur.fetchone()
+                if row:
+                    cache_data["ocr_text"] = row[0]
+                    user_edited = True
+
+            cache_data.update({
+                "cached": True,
+                "page_num": page_num,
+                "total_pages": total_pages,
+                "title": title,
+                "ocr_pending": False,
+                "user_edited": user_edited,
+            })
+            self._in_memory[cache_key] = cache_data
+            return cache_data
+
+        except Exception as e:
+            return {"error": f"Re-OCR failed: {e}"}
+
     # ── User-edited text (permanent save) ─────────────────────────────
 
     def save_page_text(self, pdf_id: str, page_num: int, text: str) -> dict:
@@ -496,6 +570,7 @@ class PDFProcessor:
             'ﬁ': 'fi',
             'ﬂ': 'fl',
             '℔': 'lb',
+            '¬': '-',       # OCR misrecognized hyphen as not-sign
         }
         for old, new in replacements.items():
             text = text.replace(old, new)
@@ -543,7 +618,7 @@ class PDFProcessor:
             import fitz
             doc = fitz.open(pdf_path)
             page = doc.load_page(page_num - 1)
-            dpi = 400 if model_type == "manuscript" else 300
+            dpi = 600
             pix = page.get_pixmap(dpi=dpi)
             img_bytes = pix.tobytes("png")
             doc.close()
