@@ -85,10 +85,12 @@ def parse_morph(m: str) -> dict:
             info["number"] = "Plural"
         elif "S" in m:
             info["number"] = "Singular"
-        for g in ["M","F","N"]:
-            if g in m:
-                info["gender"] = GENDER_LABELS[g]
-                break
+        # Gender: match M/F/N only when they appear as standalone gender markers
+        # after the case+number part (e.g. NOMSM, NOMPF), not as part of S/P.
+        gender_match = re.search(r'(?:NOM|GEN|DAT|ACC|ABL|VOC)[SP]([MFN])', m)
+        if gender_match:
+            g = gender_match.group(1)
+            info["gender"] = GENDER_LABELS.get(g, g)
     else:
         info["raw"] = m
     return info

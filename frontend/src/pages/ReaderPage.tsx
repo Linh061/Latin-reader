@@ -373,6 +373,7 @@ export default function ReaderPage() {
   const [textSearchResults, setTextSearchResults] = useState<{
     chapter_number: number;
     chapter_title: string;
+    paragraph_index: number;
     text: string;
     match_index: number;
   }[] | null>(null);
@@ -661,6 +662,42 @@ export default function ReaderPage() {
     }
   }, []);
 
+  // Jump to a specific paragraph in a chapter: find the page that contains it, then scroll
+  const jumpToParagraph = useCallback(async (chapterNumber: number, paragraphIndex: number) => {
+    if (!bookId) return;
+    setTextSearchResults(null);
+
+    // First, jump to the chapter to find the right page
+    try {
+      const res = await fetch(`${API}/api/books/${bookId}?page=1&per_page=999999`);
+      const data = await res.json();
+      if (!data.chapters) return;
+
+      // Find the global paragraph index of the target paragraph
+      let globalParaIndex = 0;
+      for (const ch of data.chapters) {
+        if (ch.number === chapterNumber) {
+          globalParaIndex += paragraphIndex;
+          const targetPage = Math.floor(globalParaIndex / PER_PAGE) + 1;
+          setPage(targetPage);
+          // After page loads, scroll to the paragraph
+          setTimeout(() => {
+            const el = document.getElementById(`para-${chapterNumber}-${paragraphIndex}`);
+            if (el) {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              el.style.backgroundColor = '#f7e8c0';
+              setTimeout(() => { el.style.backgroundColor = 'transparent'; }, 2000);
+            }
+          }, 300);
+          return;
+        }
+        globalParaIndex += (ch.paragraphs || []).length;
+      }
+    } catch {
+      // fallback
+    }
+  }, [bookId]);
+
   // Search text within current book
   const handleTextSearch = useCallback(async () => {
     const q = textSearchQ.trim();
@@ -886,7 +923,12 @@ export default function ReaderPage() {
                 <div style={{ color: '#8b7355', fontStyle: 'italic', fontSize: '13px' }}>No results found.</div>
               ) : (
                 textSearchResults.slice(0, 20).map((r, i) => (
-                  <div key={i} style={{ padding: '6px 0', borderBottom: '1px solid #e0d0b0', cursor: 'pointer' }}>
+                  <div key={i}
+                    onClick={() => jumpToParagraph(r.chapter_number, r.paragraph_index)}
+                    style={{ padding: '6px 0', borderBottom: '1px solid #e0d0b0', cursor: 'pointer' }}
+                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f0e8d0')}
+                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+                  >
                     <div style={{ fontSize: '11px', color: '#6b4c2a', fontStyle: 'italic' }}>
                       {r.chapter_title || `Chapter ${r.chapter_number}`}
                     </div>
@@ -1064,7 +1106,7 @@ export default function ReaderPage() {
               <div key={ci} ref={(el) => { if (el) chapterRefs.current.set(ch.number, el); }} style={S.chapter}>
                 <div style={S.chapterTitle}>{ch.title || `Chapter ${ch.number}`}</div>
                 {ch.paragraphs.map((para: string, pi: number) => (
-                  <div key={pi} style={S.paragraph}>{renderText(para, handleWordClick)}</div>
+                  <div key={pi} id={`para-${ch.number}-${pi}`} style={S.paragraph}>{renderText(para, handleWordClick)}</div>
                 ))}
               </div>
             ))

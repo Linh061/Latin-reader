@@ -487,6 +487,7 @@ def save_book_text(book_id: str, chapter_number: int, paragraph_index: int, new_
     """
     Save edited text for a specific paragraph in a book.
     Updates both the cache file and returns success.
+    Uses atomic write (temp file + rename) to prevent corruption on crash.
     """
     cache_path = _cache_path(book_id)
     if not os.path.exists(cache_path):
@@ -499,10 +500,14 @@ def save_book_text(book_id: str, chapter_number: int, paragraph_index: int, new_
         if ch["number"] == chapter_number:
             if 0 <= paragraph_index < len(ch["paragraphs"]):
                 ch["paragraphs"][paragraph_index] = new_text
-                with open(cache_path, 'w', encoding='utf-8') as f:
+                # Atomic write: write to temp file, then rename
+                tmp_path = cache_path + '.tmp'
+                with open(tmp_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, cache_path)
                 return True
     return False
+
 
 
 def list_books() -> List[Dict]:
@@ -932,7 +937,7 @@ def search_books(query: str, book_id: Optional[str] = None) -> List[Dict]:
         if not book:
             continue
         for ch in book.chapters:
-            for para in ch.paragraphs:
+            for para_idx, para in enumerate(ch.paragraphs):
                 text_lower = para.text.lower()
                 idx = text_lower.find(query_lower)
                 if idx != -1:
@@ -941,6 +946,7 @@ def search_books(query: str, book_id: Optional[str] = None) -> List[Dict]:
                         "book_title": book.title,
                         "chapter_number": ch.number,
                         "chapter_title": ch.title,
+                        "paragraph_index": para_idx,
                         "text": para.text,
                         "match_index": idx,
                     })

@@ -8,7 +8,9 @@ import os
 import re
 import sqlite3
 import threading
-from typing import Optional, List
+from typing import Optional, List, Dict
+
+
 
 DB = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache", "words.db")
 
@@ -99,9 +101,81 @@ def _query(sql: str, params: tuple = ()) -> list[sqlite3.Row]:
         return c.fetchall()
 
 
+# ── Morphology parser (inlined to avoid circular import) ────────────────────
+
+VERB_LABELS = {
+    "PRS": "Present",  "IMF": "Imperfect",  "FUT": "Future",
+    "PRF": "Perfect",  "PLP": "Pluperfect", "FTP": "Future Perfect",
+}
+ACT_LABELS = {
+    "ACT": "Active",  "PAS": "Passive",
+    "INF": "Infinitive", "IMP": "Imperative",
+    "SBJ": "Subjunctive",
+}
+PERSON_LABELS = {
+    "1S": "1st Sing",   "2S": "2nd Sing",   "3S": "3rd Sing",
+    "1P": "1st Plur",   "2P": "2nd Plur",   "3P": "3rd Plur",
+}
+CASE_LABELS = {
+    "NOM": "Nominative", "GEN": "Genitive",  "DAT": "Dative",
+    "ACC": "Accusative", "ABL": "Ablative",  "VOC": "Vocative",
+}
+GENDER_LABELS = {"M": "Masculine", "F": "Feminine", "N": "Neuter"}
+
+
+def parse_morph(m: str) -> dict:
+    """Parse morphology string into human-readable components."""
+    info: Dict[str, str] = {}
+    # Verb patterns
+    if any(t in m for t in ["PRS","IMF","FUT","PRF","PLP","FTP"]):
+        for k in ["PRS","IMF","FUT","PRF","PLP","FTP"]:
+            if k in m:
+                info["tense"] = VERB_LABELS[k]
+                break
+        for k in ["ACT","PAS","INF","IMP","SBJ"]:
+            if k in m:
+                info["voice"] = ACT_LABELS[k]
+                break
+        for k in ["1S","2S","3S","1P","2P","3P"]:
+            if k in m:
+                info["person"] = PERSON_LABELS[k]
+                break
+        if "PPP" in m or "PPA" in m:
+            info["form"] = "Participle"
+            for g in ["M","F","N"]:
+                if g in m:
+                    info["gender"] = GENDER_LABELS[g]
+                    break
+    # Noun/Adjective patterns
+    elif any(c in m for c in ["NOM","GEN","DAT","ACC","ABL","VOC"]):
+        for c in ["NOM","GEN","DAT","ACC","ABL","VOC"]:
+            if c in m:
+                info["case"] = CASE_LABELS[c]
+                break
+        if "P" in m:
+            info["number"] = "Plural"
+        elif "S" in m:
+            info["number"] = "Singular"
+        # Gender: match M/F/N only when they appear as standalone gender markers
+        # after the case+number part. The morphology codes follow this pattern:
+        #   CASE + NUMBER + GENDER  (e.g. NOMSM, NOMPF, GENSN)
+        #   CASE + NUMBER          (e.g. NOMS, NOMP, GENS)
+        # So gender is present when the code has more than 4 chars (case=3 + number=1 + gender=1)
+        # OR when the code explicitly has M/F/N after the case part.
+        # Use regex: match M/F/N that appears after the case code (not as part of S/P)
+        gender_match = re.search(r'(?:NOM|GEN|DAT|ACC|ABL|VOC)[SP]([MFN])', m)
+        if gender_match:
+            g = gender_match.group(1)
+            info["gender"] = GENDER_LABELS.get(g, g)
+    else:
+        info["raw"] = m
+    return info
+
+
 # ── Lemmatizer ─────────────────────────────────────────────────────────────
 
 class Lemmatizer:
+
     def __init__(self):
         self._all_forms: Optional[list[tuple[str, str]]] = None  # (form, phon_norm)
 
@@ -113,7 +187,12 @@ class Lemmatizer:
         self._all_forms = [(r["form"], _phonetic_norm(r["form"])) for r in rows]
 
     def lemmatize(self, word: str) -> List[dict]:
-        """Exact match: return list of {lemma, lemma_form, part_of_speech, meaning, translation, morphology}."""
+        """Exact match: return list of {lemma, lemma_form, part_of_speech, meaning, translation, morphology}.
+
+        First tries forms table (inflected forms). If no match found,
+        falls back to lemmas table to handle indeclinable words
+        (e.g. et, atque, in, ad) that have no inflection rules.
+        """
         w = norm(word.lower().strip())
         rows = _query("""
             SELECT l.lemma, l.pos, l.meaning, f.morphology
@@ -122,6 +201,16 @@ class Lemmatizer:
             WHERE f.form = ?
             LIMIT 20;
         """, (w,))
+
+        # Fallback: indeclinable words not in forms table → look up lemmas directly
+        if not rows:
+            rows = _query("""
+                SELECT lemma, pos, meaning, '' as morphology
+                FROM lemmas
+                WHERE lemma = ?
+                LIMIT 5;
+            """, (w,))
+
         seen = set()
         results = []
         for r in rows:
@@ -129,15 +218,20 @@ class Lemmatizer:
             if lemma in seen:
                 continue
             seen.add(lemma)
+            # Convert morphology code (e.g. "IMF3P") to human-readable text
+            morph_raw = r["morphology"] or ""
+            morph_info = parse_morph(morph_raw)
+            morph_readable = ", ".join(v for v in morph_info.values() if v)
             results.append({
                 "lemma": lemma,
                 "lemma_form": lemma,
                 "part_of_speech": r["pos"],
                 "meaning": r["meaning"] or "",
                 "translation": r["meaning"] or "",
-                "morphology": r["morphology"] or "",
+                "morphology": morph_readable or morph_raw,
             })
         return results
+
 
     def fuzzy_search(self, word: str, max_distance: int = 2, max_results: int = 10) -> List[dict]:
         """Fuzzy search: try prefix match first, then LIKE, then Levenshtein."""
@@ -202,8 +296,35 @@ class Lemmatizer:
                     break
             return results
 
-        # 3. Levenshtein (slowest, only as last resort)
+        # 3. Fallback: try lemmas table (for indeclinable words not in forms)
+        lemma_rows = _query("""
+            SELECT lemma, pos, meaning FROM lemmas
+            WHERE lemma LIKE ? || '%'
+            LIMIT ?;
+        """, (w, max_results))
+        if lemma_rows:
+            seen = set()
+            results = []
+            for r in lemma_rows:
+                lemma = r["lemma"]
+                if lemma in seen:
+                    continue
+                seen.add(lemma)
+                results.append({
+                    "form": r["lemma"],
+                    "lemma": lemma,
+                    "part_of_speech": r["pos"],
+                    "meaning": r["meaning"] or "",
+                    "distance": 0,
+                    "highlight": _highlight_ranges(r["lemma"], w),
+                })
+                if len(results) >= max_results:
+                    break
+            return results
+
+        # 4. Levenshtein (slowest, only as last resort)
         self._load_forms()
+
         candidates = []
         for form, phon in self._all_forms:
             d = _levenshtein(w_phon, phon)
@@ -269,7 +390,29 @@ class Lemmatizer:
                 "meaning": r["meaning"] or "",
                 "highlight": _highlight_ranges(r["form"], w),
             })
+
+        # Fallback: try lemmas table (for indeclinable words not in forms)
+        if not results:
+            lemma_rows = _query("""
+                SELECT lemma, pos, meaning FROM lemmas
+                WHERE lemma LIKE ? || '%'
+                LIMIT ?;
+            """, (w, max_results))
+            for r in lemma_rows:
+                lemma = r["lemma"]
+                if lemma in seen:
+                    continue
+                seen.add(lemma)
+                results.append({
+                    "form": r["lemma"],
+                    "lemma": lemma,
+                    "part_of_speech": r["pos"],
+                    "meaning": r["meaning"] or "",
+                    "highlight": _highlight_ranges(r["lemma"], w),
+                })
+
         return results
+
 
 
 def _highlight_ranges(form: str, query: str) -> list[dict]:
