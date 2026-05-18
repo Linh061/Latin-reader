@@ -22,7 +22,7 @@ from engine.dictionary import get_dictionary, lookup, reverse_lookup
 from engine.inflection import generate_table
 from engine.ocr import ocr_image, ocr_image_with_analysis
 from engine.pdf_ocr import get_pdf_processor
-from books import load_book, list_books, search_books
+from books import load_book, list_books, search_books, save_book_text, import_book_file, delete_book
 
 
 app = Flask(__name__)
@@ -384,12 +384,66 @@ def ocr_analyze():
 
 
 @app.route("/api/books", methods=["GET"])
-
 def books_list():
     """List all available books."""
     try:
         books = list_books()
         return jsonify({"books": books})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/books/upload", methods=["POST"])
+def books_upload():
+    """
+    Upload a Latin book file (HTML or TXT).
+
+    multipart/form-data:
+        file: the book file (.html, .htm, or .txt)
+
+    Returns:
+        book_id, title, author, chapters count
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "Missing 'file'"}), 400
+
+    file = request.files["file"]
+    filename = file.filename or ""
+    ext = os.path.splitext(filename)[1].lower()
+
+    if ext not in ('.html', '.htm', '.txt'):
+        return jsonify({
+            "error": f"Unsupported file type: '{ext}'. Supported: .html, .htm, .txt"
+        }), 400
+
+    # Save to a temp location, then import
+    import tempfile
+    import uuid
+    tmp_path = os.path.join(tempfile.gettempdir(), f"book_upload_{uuid.uuid4().hex}{ext}")
+    try:
+        file.save(tmp_path)
+        book = import_book_file(tmp_path)
+        return jsonify({
+            "book_id": book.id,
+            "title": book.title,
+            "author": book.author,
+            "chapters": len(book.chapters),
+        })
+    except Exception as e:
+        return jsonify({"error": f"Failed to import book: {str(e)}"}), 500
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+@app.route("/api/books/<book_id>", methods=["DELETE"])
+def book_delete(book_id: str):
+    """Delete a book by id (removes cache JSON and source file)."""
+    try:
+        ok = delete_book(book_id)
+        if not ok:
+            return jsonify({"error": "Book not found"}), 404
+        return jsonify({"success": True, "message": f"Book '{book_id}' deleted"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -507,6 +561,77 @@ def search():
                 "has_prev": page > 1,
             },
         })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/books/<book_id>/bookmark", methods=["GET"])
+def book_get_bookmarks(book_id: str):
+    """Get all bookmarks for a book."""
+    try:
+        from books import get_bookmarks
+        bookmarks = get_bookmarks(book_id)
+        return jsonify({"bookmarks": bookmarks})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/books/<book_id>/bookmark", methods=["PUT"])
+def book_add_bookmark(book_id: str):
+    """Add a bookmark for a book chapter."""
+    data = request.get_json()
+    if not data or "chapter" not in data:
+        return jsonify({"error": "Missing 'chapter'"}), 400
+    try:
+        from books import add_bookmark
+        label = data.get("label", "")
+        bookmarks = add_bookmark(book_id, int(data["chapter"]), label)
+        return jsonify({"success": True, "bookmarks": bookmarks})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/books/<book_id>/bookmark", methods=["DELETE"])
+def book_remove_bookmark(book_id: str):
+    """Remove a bookmark for a book chapter."""
+    data = request.get_json()
+    if not data or "chapter" not in data:
+        return jsonify({"error": "Missing 'chapter'"}), 400
+    try:
+        from books import remove_bookmark
+        bookmarks = remove_bookmark(book_id, int(data["chapter"]))
+        return jsonify({"success": True, "bookmarks": bookmarks})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/books/<book_id>/text", methods=["PUT"])
+def book_save_text(book_id: str):
+    """
+    Save edited text for a specific paragraph in an HTML book.
+
+    Request JSON:
+        chapter_number: int - The chapter number
+        paragraph_index: int - The paragraph index within the chapter
+        text: str - The new text
+
+    Returns:
+        success: bool
+    """
+    data = request.get_json()
+    if not data or "text" not in data or "chapter_number" not in data or "paragraph_index" not in data:
+        return jsonify({"error": "Missing 'text', 'chapter_number', or 'paragraph_index'"}), 400
+
+    try:
+        ok = save_book_text(
+            book_id,
+            int(data["chapter_number"]),
+            int(data["paragraph_index"]),
+            data["text"],
+        )
+        if not ok:
+            return jsonify({"error": "Could not save text (book or paragraph not found)"}), 404
+        return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -700,6 +825,50 @@ def pdf_delete(pdf_id: str):
         result = proc.delete_pdf(pdf_id)
         if "error" in result:
             return jsonify(result), 404 if "not found" in result.get("error", "") else 400
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pdf/<pdf_id>/bookmark", methods=["GET"])
+def pdf_get_bookmarks(pdf_id: str):
+    """Get all bookmarks for a PDF."""
+    try:
+        proc = get_pdf_processor()
+        bookmarks = proc.get_bookmarks(pdf_id)
+        return jsonify({"bookmarks": bookmarks})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pdf/<pdf_id>/bookmark", methods=["PUT"])
+def pdf_add_bookmark(pdf_id: str):
+    """Add a bookmark for a PDF page."""
+    data = request.get_json()
+    if not data or "page" not in data:
+        return jsonify({"error": "Missing 'page'"}), 400
+    try:
+        proc = get_pdf_processor()
+        label = data.get("label", "")
+        result = proc.add_bookmark(pdf_id, int(data["page"]), label)
+        if "error" in result:
+            return jsonify(result), 400
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pdf/<pdf_id>/bookmark", methods=["DELETE"])
+def pdf_remove_bookmark(pdf_id: str):
+    """Remove a bookmark for a PDF page."""
+    data = request.get_json()
+    if not data or "page" not in data:
+        return jsonify({"error": "Missing 'page'"}), 400
+    try:
+        proc = get_pdf_processor()
+        result = proc.remove_bookmark(pdf_id, int(data["page"]))
+        if "error" in result:
+            return jsonify(result), 400
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

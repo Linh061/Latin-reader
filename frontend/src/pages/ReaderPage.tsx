@@ -88,7 +88,6 @@ const S: Record<string, React.CSSProperties> = {
     borderRadius: '2px',
     transition: 'background 0.1s',
   },
-  // Result cards
   resultCard: {
     borderBottom: '1px solid #5a3d2b',
     padding: '8px 0',
@@ -114,7 +113,6 @@ const S: Record<string, React.CSSProperties> = {
     color: '#7b3f9e',
     marginTop: '2px',
   },
-  // Dict entry
   dictEntry: {
     borderBottom: '1px solid #5a3d2b',
     padding: '8px 0',
@@ -124,7 +122,6 @@ const S: Record<string, React.CSSProperties> = {
     color: '#c4a77d',
     fontStyle: 'italic',
   },
-  // Pagination
   pagination: {
     display: 'flex',
     justifyContent: 'center',
@@ -163,16 +160,110 @@ const S: Record<string, React.CSSProperties> = {
   error: { color: '#8b1a1a', fontSize: '13px', padding: '8px', borderLeft: '3px solid #8b1a1a', backgroundColor: '#fce8e6', margin: '8px 0' },
 };
 
-// ─── Helper: split text into clickable words ──────────────────────────────
+// ─── Helper: escape regex ──────────────────────────────────────────────────
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ─── Helper: highlight text (returns JSX) ──────────────────────────────────
+
+function highlightText(text: string, query: string): React.ReactNode {
+  if (!query) return text;
+  const escaped = escapeRegex(query);
+  const parts = text.split(new RegExp(`(${escaped})`, 'gi'));
+  return parts.map((part, i) =>
+    part.toLowerCase() === query.toLowerCase()
+      ? <mark key={i} style={{ backgroundColor: '#f7d44a', color: '#2c1810', padding: '0 2px', borderRadius: '2px' }}>{part}</mark>
+      : part
+  );
+}
+
+// ─── Helper: split text into clickable words, preserving HTML tags ────────
 
 function renderText(text: string, onClick: (word: string, e: React.MouseEvent) => void) {
+  const parts: React.ReactNode[] = [];
+  // Split by HTML tags and text
+  const regex = /(<[^>]+>)|([^<]+)/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    if (match[1]) {
+      // It's an HTML tag — render it as-is
+      parts.push(<span key={parts.length} dangerouslySetInnerHTML={{ __html: match[1] }} />);
+    } else if (match[2]) {
+      // It's plain text — process Markdown bold and URLs
+      const plainText = match[2];
+      // Process Markdown bold: **text** → <strong>text</strong>
+      const boldRegex = /\*\*(.+?)\*\*/g;
+      let lastIdx = 0;
+      let boldMatch: RegExpExecArray | null;
+      const boldSegments: { start: number; end: number; text: string }[] = [];
+      while ((boldMatch = boldRegex.exec(plainText)) !== null) {
+        boldSegments.push({ start: boldMatch.index, end: boldMatch.index + boldMatch[0].length, text: boldMatch[1] });
+      }
+      if (boldSegments.length > 0) {
+        let pos = 0;
+        for (const seg of boldSegments) {
+          // Text before bold
+          if (seg.start > pos) {
+            parts.push(...renderPlainText(plainText.slice(pos, seg.start), onClick));
+          }
+          // Bold text — render as <strong>
+          parts.push(<strong key={parts.length} style={{ color: '#2c1810' }}>{seg.text}</strong>);
+          pos = seg.end;
+        }
+        // Text after last bold
+        if (pos < plainText.length) {
+          parts.push(...renderPlainText(plainText.slice(pos), onClick));
+        }
+      } else {
+        parts.push(...renderPlainText(plainText, onClick));
+      }
+    }
+  }
+  return parts;
+}
+
+// Helper: render plain text with clickable words and URL detection
+function renderPlainText(text: string, onClick: (word: string, e: React.MouseEvent) => void): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  // Detect URLs: www.example.com or http://example.com
+  const urlRegex = /(https?:\/\/[^\s]+|www\.[^\s]+)/g;
+  let lastIdx = 0;
+  let urlMatch: RegExpExecArray | null;
+  while ((urlMatch = urlRegex.exec(text)) !== null) {
+    // Text before URL
+    if (urlMatch.index > lastIdx) {
+      parts.push(...renderWords(text.slice(lastIdx, urlMatch.index), onClick));
+    }
+    // URL — render as clickable link
+    const url = urlMatch[0];
+    const href = url.startsWith('http') ? url : `https://${url}`;
+    parts.push(
+      <a key={parts.length} href={href} target="_blank" rel="noopener noreferrer"
+        style={{ color: '#1a6dd4', textDecoration: 'underline', cursor: 'pointer' }}>
+        {url}
+      </a>
+    );
+    lastIdx = urlMatch.index + urlMatch[0].length;
+  }
+  // Text after last URL
+  if (lastIdx < text.length) {
+    parts.push(...renderWords(text.slice(lastIdx), onClick));
+  }
+  return parts;
+}
+
+// Helper: split text into clickable words and punctuation
+function renderWords(text: string, onClick: (word: string, e: React.MouseEvent) => void): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
   const tokens = text.split(/(\s+|[.,;:!?()\[\]{}"\-])/);
-  return tokens.map((token, i) => {
+  for (const token of tokens) {
     const isWord = /^[a-zA-Z\u0100-\u024F]+$/.test(token);
     if (isWord) {
-      return (
+      parts.push(
         <span
-          key={i}
+          key={parts.length}
           style={S.word}
           onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f0e0b0')}
           onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
@@ -181,18 +272,20 @@ function renderText(text: string, onClick: (word: string, e: React.MouseEvent) =
           {token}
         </span>
       );
+    } else {
+      parts.push(<span key={parts.length}>{token}</span>);
     }
-    return <span key={i}>{token}</span>;
-  });
+  }
+  return parts;
 }
 
 // ─── Helper Components ─────────────────────────────────────────────────────
 
-function ParseResultCard({ result, onInflect }: { result: ParseResult; onInflect?: (lemma: string) => void }) {
+function ParseResultCard({ result, onInflect, highlight }: { result: ParseResult; onInflect?: (lemma: string) => void; highlight?: string }) {
   return (
     <div style={S.resultCard}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={S.lemma}>{result.lemma_form}</div>
+        <div style={S.lemma}>{highlightText(result.lemma_form, highlight || '')}</div>
         {onInflect && (
           <button
             onClick={(e) => { e.stopPropagation(); onInflect(result.lemma); }}
@@ -219,14 +312,38 @@ function ParseResultCard({ result, onInflect }: { result: ParseResult; onInflect
   );
 }
 
-function DictEntryCard({ entry }: { entry: DictEntry }) {
+function DictEntryCard({ entry, highlight }: { entry: DictEntry; highlight?: string }) {
   return (
     <div style={S.dictEntry}>
-      <div style={{ fontWeight: 'bold', fontSize: '15px', color: '#e8d5b0' }}>{entry.key}</div>
+      <div style={{ fontWeight: 'bold', fontSize: '15px', color: '#e8d5b0' }}>{highlightText(entry.key, highlight || '')}</div>
       <div style={S.pos}>{entry.part_of_speech}</div>
       <div style={S.dictMeaning}>{entry.meaning}</div>
     </div>
   );
+}
+
+// ─── Render suggestion with highlight ─────────────────────────────────────
+
+function renderSuggestionHtml(s: any): string {
+  const form = s.form || '';
+  const lemma = s.lemma || '';
+  const pos = s.part_of_speech || '';
+  const hl = s.highlight || [];
+
+  let formHtml = '';
+  if (hl.length > 0) {
+    let last = 0;
+    for (const r of hl) {
+      formHtml += form.slice(last, r.start);
+      formHtml += `<mark style="background-color:#f7d44a;color:#2c1810;padding:0 2px;border-radius:2px">${form.slice(r.start, r.end)}</mark>`;
+      last = r.end;
+    }
+    formHtml += form.slice(last);
+  } else {
+    formHtml = form;
+  }
+
+  return `${formHtml} (${lemma}, ${pos})`;
 }
 
 // ─── Main Page ─────────────────────────────────────────────────────────────
@@ -242,14 +359,15 @@ export default function ReaderPage() {
     y: number;
     parses: ParseResult[];
     dict: DictEntry[];
-    suggestions?: string[];
+    suggestions?: any[];
   } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const popupRef = useRef<HTMLDivElement>(null);
+  const rightPanelRef = useRef<HTMLDivElement>(null);
   const [searchWord, setSearchWord] = useState('');
   const [searchingWord, setSearchingWord] = useState(false);
-  const [reverseMode, setReverseMode] = useState(false); // false=Latin→Eng, true=Eng→Latin
+  const [reverseMode, setReverseMode] = useState(false);
   const [textSearchQ, setTextSearchQ] = useState('');
   const [textSearching, setTextSearching] = useState(false);
   const [textSearchResults, setTextSearchResults] = useState<{
@@ -271,12 +389,82 @@ export default function ReaderPage() {
   } | null>(null);
   const PER_PAGE = 10;
 
+  // ── Edit mode state ──────────────────────────────────────────────────────
+  const [editMode, setEditMode] = useState(false);
+  const [editFullText, setEditFullText] = useState('');
+  const [savingText, setSavingText] = useState(false);
+  const [tocOpen, setTocOpen] = useState(false);
+  const [bookmarkOpen, setBookmarkOpen] = useState(false);
+  const [allChapters, setAllChapters] = useState<{ number: number; title: string }[]>([]);
+  const [bookmarks, setBookmarks] = useState<{ chapter: number; label: string }[]>([]);
+  const chapterRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
+  // Load full chapter list (for TOC) — separate from paginated content
+  const loadChapterList = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(`${API}/api/books/${id}?page=1&per_page=999999`);
+      const data = await res.json();
+      if (data.chapters) {
+        setAllChapters(data.chapters.map((ch: any) => ({ number: ch.number, title: ch.title })));
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Load bookmarks
+  const loadBookmarks = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(`${API}/api/books/${id}/bookmark`);
+      const data = await res.json();
+      if (data.bookmarks) {
+        setBookmarks(data.bookmarks);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Add bookmark
+  const addBookmark = useCallback(async (chapter: number) => {
+    if (!bookId) return;
+    try {
+      const res = await fetch(`${API}/api/books/${bookId}/bookmark`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chapter, label: allChapters.find(c => c.number === chapter)?.title || `Chapter ${chapter}` }),
+      });
+      const data = await res.json();
+      if (data.bookmarks) setBookmarks(data.bookmarks);
+    } catch {
+      // ignore
+    }
+  }, [bookId, allChapters]);
+
+  // Remove bookmark
+  const removeBookmark = useCallback(async (chapter: number) => {
+    if (!bookId) return;
+    try {
+      const res = await fetch(`${API}/api/books/${bookId}/bookmark`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chapter }),
+      });
+      const data = await res.json();
+      if (data.bookmarks) setBookmarks(data.bookmarks);
+    } catch {
+      // ignore
+    }
+  }, [bookId]);
+
   // Load book
   const loadBook = useCallback(async (id: string, p: number) => {
     setLoading(true);
     setError(null);
     setPopup(null);
     setPagination(null);
+    setEditMode(false);
+    setEditFullText('');
     try {
       const res = await fetch(`${API}/api/books/${id}?page=${p}&per_page=${PER_PAGE}&force=0`);
       const data = await res.json();
@@ -295,12 +483,72 @@ export default function ReaderPage() {
     }
   }, []);
 
-  // Load book on mount / bookId change
+  // Restore last reading position from localStorage on mount
   useEffect(() => {
-    if (bookId) loadBook(bookId, page);
-  }, [bookId, page, loadBook]);
+    if (bookId) {
+      try {
+        const saved = localStorage.getItem(`reading_progress_${bookId}`);
+        if (saved) {
+          const savedPage = parseInt(saved, 10);
+          if (!isNaN(savedPage) && savedPage > 0) {
+            setPage(savedPage);
+            return; // loadBook will be triggered by page change
+          }
+        }
+      } catch { /* ignore */ }
+      loadBook(bookId, page);
+      loadChapterList(bookId);
+      loadBookmarks(bookId);
+    }
+  }, [bookId]); // only on mount/bookId change
 
-  // Search word from header (Latin→Eng or Eng→Latin)
+  // Save reading progress on every page change
+  useEffect(() => {
+    if (bookId && page > 0) {
+      try {
+        localStorage.setItem(`reading_progress_${bookId}`, String(page));
+      } catch { /* ignore */ }
+    }
+  }, [bookId, page]);
+
+  // Load book content when page changes (after initial restore)
+  useEffect(() => {
+    if (bookId) {
+      loadBook(bookId, page);
+      loadChapterList(bookId);
+      loadBookmarks(bookId);
+    }
+  }, [bookId, page, loadBook, loadChapterList, loadBookmarks]);
+
+  // Jump to a specific chapter: find the page that contains it
+  const jumpToChapter = useCallback(async (chapterNumber: number) => {
+    if (!bookId) return;
+    setTocOpen(false);
+
+    // Calculate which page this chapter is on by scanning all items
+    try {
+      const res = await fetch(`${API}/api/books/${bookId}?page=1&per_page=999999`);
+      const data = await res.json();
+      if (!data.chapters) return;
+
+      // Find the paragraph index of the first paragraph in this chapter
+      let paraIndex = 0;
+      for (const ch of data.chapters) {
+        if (ch.number === chapterNumber) {
+          // Found it — calculate page
+          const targetPage = Math.floor(paraIndex / PER_PAGE) + 1;
+          setPage(targetPage);
+          return;
+        }
+        paraIndex += (ch.paragraphs || []).length;
+      }
+    } catch {
+      // fallback: just go to page 1
+      setPage(1);
+    }
+  }, [bookId]);
+
+  // Search word from header
   const handleSearchWord = useCallback(async () => {
     const word = searchWord.trim();
     if (!word) return;
@@ -308,7 +556,6 @@ export default function ReaderPage() {
     setPopup(null);
     try {
       if (reverseMode) {
-        // English → Latin reverse lookup
         const res = await fetch(`${API}/api/reverse`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -327,7 +574,6 @@ export default function ReaderPage() {
           })),
         });
       } else {
-        // Latin → English fuzzy search
         const res = await fetch(`${API}/api/fuzzy`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -336,22 +582,16 @@ export default function ReaderPage() {
         const data = await res.json();
 
         if (data.exact && data.exact.length > 0) {
-          const allDict: DictEntry[] = [];
-          for (const pr of data.exact) {
-            const dRes = await fetch(`${API}/api/dict`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ key: pr.lemma }),
-            });
-            const dData = await dRes.json();
-            if (dData.results) allDict.push(...dData.results);
-          }
           setPopup({
             word,
             x: 60,
             y: 120,
             parses: data.exact,
-            dict: allDict,
+            dict: data.exact.map((pr: any) => ({
+              key: pr.lemma,
+              part_of_speech: pr.part_of_speech,
+              meaning: pr.meaning || '',
+            })),
           });
         } else if (data.fuzzy && data.fuzzy.length > 0) {
           setPopup({
@@ -360,7 +600,7 @@ export default function ReaderPage() {
             y: 120,
             parses: [],
             dict: [],
-            suggestions: data.fuzzy.map((f: any) => `${f.form} (${f.lemma}, ${f.part_of_speech})`),
+            suggestions: data.fuzzy,
           });
         } else if (data.prefix && data.prefix.length > 0) {
           setPopup({
@@ -369,7 +609,7 @@ export default function ReaderPage() {
             y: 120,
             parses: [],
             dict: [],
-            suggestions: data.prefix.map((f: any) => `${f.form} (${f.lemma}, ${f.part_of_speech})`),
+            suggestions: data.prefix,
           });
         } else {
           setPopup({
@@ -438,7 +678,7 @@ export default function ReaderPage() {
     }
   }, [textSearchQ, bookId]);
 
-  // Fetch inflection table for a lemma
+  // Fetch inflection table
   const handleInflect = useCallback(async (lemma: string) => {
     setInflecting(lemma);
     setInflectTable(null);
@@ -461,11 +701,25 @@ export default function ReaderPage() {
     }
   }, []);
 
-  // Close popup on background click
+  // Close popup only when clicking on the left panel's text area (not on interactive elements)
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (popupRef.current && !popupRef.current.contains(e.target as Node)) {
-        setPopup(null);
+        const target = e.target as HTMLElement;
+        const tag = target.tagName.toLowerCase();
+        // Never clear on interactive elements
+        if (tag === 'input' || tag === 'button' || tag === 'textarea' || tag === 'select') {
+          return;
+        }
+        // Never clear if clicking inside the right panel
+        if (rightPanelRef.current && rightPanelRef.current.contains(target)) {
+          return;
+        }
+        // Only clear if clicking on the left panel's text content (not header, not pagination)
+        const leftPanel = target.closest('[class*="leftPanel"]');
+        if (leftPanel) {
+          setPopup(null);
+        }
       }
     };
     if (popup) {
@@ -473,6 +727,99 @@ export default function ReaderPage() {
       return () => document.removeEventListener('mousedown', handler);
     }
   }, [popup]);
+
+  // ── Keyboard shortcuts: ← → for page navigation ────────────────────────
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowLeft' && pagination?.has_prev) {
+        setPage(p => Math.max(1, p - 1));
+      } else if (e.key === 'ArrowRight' && pagination?.has_next) {
+        setPage(p => p + 1);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [pagination]);
+
+  // ── Edit mode handlers ──────────────────────────────────────────────────
+
+  const enterEditMode = useCallback(() => {
+    setEditMode(true);
+    // Merge all paragraphs from all chapters into one big text block
+    let fullText = '';
+    if (book) {
+      book.chapters.forEach((ch, ci) => {
+        if (ci > 0) fullText += '\n\n';
+        fullText += `[${ch.title || `Chapter ${ch.number}`}]\n`;
+        ch.paragraphs.forEach((para, pi) => {
+          if (pi > 0) fullText += '\n\n';
+          fullText += para;
+        });
+      });
+    }
+    setEditFullText(fullText);
+  }, [book]);
+
+  const cancelEdit = useCallback(() => {
+    setEditMode(false);
+    setEditFullText('');
+  }, []);
+
+  const saveEdits = useCallback(async () => {
+    if (!bookId || !book) return;
+    setSavingText(true);
+    try {
+      // Parse the edited text back into paragraphs.
+      // Split by double newlines, then group into chapters.
+      const lines = editFullText.split('\n');
+      const paragraphs: string[] = [];
+      let currentPara = '';
+      for (const line of lines) {
+        if (line.trim() === '' && currentPara) {
+          paragraphs.push(currentPara.trim());
+          currentPara = '';
+        } else {
+          currentPara += (currentPara ? ' ' : '') + line;
+        }
+      }
+      if (currentPara.trim()) paragraphs.push(currentPara.trim());
+
+      // Rebuild: skip chapter title lines (lines starting with '[')
+      let paraIdx = 0;
+      const promises: Promise<Response>[] = [];
+      book.chapters.forEach((ch) => {
+        ch.paragraphs.forEach((_para, pi) => {
+          // Skip chapter title markers in the edited text
+          while (paraIdx < paragraphs.length && paragraphs[paraIdx].startsWith('[') && paragraphs[paraIdx].endsWith(']')) {
+            paraIdx++;
+          }
+          const newText = paraIdx < paragraphs.length ? paragraphs[paraIdx] : '';
+          paraIdx++;
+          if (newText && newText !== _para) {
+            promises.push(
+              fetch(`${API}/api/books/${bookId}/text`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chapter_number: ch.number,
+                  paragraph_index: pi,
+                  text: newText,
+                }),
+              })
+            );
+          }
+        });
+      });
+      await Promise.all(promises);
+      if (bookId) loadBook(bookId, page);
+      setEditMode(false);
+      setEditFullText('');
+    } catch (err: any) {
+      setError(`Failed to save: ${err.message}`);
+    } finally {
+      setSavingText(false);
+    }
+  }, [bookId, book, editFullText, loadBook, page]);
 
   return (
     <div style={S.container}>
@@ -482,105 +829,33 @@ export default function ReaderPage() {
           {'\u2766'} {book?.title || 'Reader'}
         </span>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <button
-            onClick={() => navigate('/')}
-            style={{
-              padding: '5px 12px',
-              borderRadius: '3px',
-              border: '1px solid #8b4513',
-              backgroundColor: '#5a3d2b',
-              color: '#e8d5b0',
-              cursor: 'pointer',
-              fontSize: '12px',
-              fontFamily: 'Georgia, serif',
-            }}
-          >
+          <button onClick={() => navigate('/')} style={{ padding: '5px 12px', borderRadius: '3px', border: '1px solid #8b4513', backgroundColor: '#5a3d2b', color: '#e8d5b0', cursor: 'pointer', fontSize: '12px', fontFamily: 'Georgia, serif' }}>
             {'\u2190'} Home
           </button>
-          {/* Text search within book */}
-          <input
-            value={textSearchQ}
-            onChange={e => setTextSearchQ(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') handleTextSearch(); }}
-            placeholder="Search in this book…"
-            style={{
-              padding: '5px 10px',
-              borderRadius: '3px',
-              border: '1px solid #8b4513',
-              backgroundColor: '#faf0dc',
-              color: '#2c1810',
-              fontSize: '12px',
-              fontFamily: 'Georgia, serif',
-              outline: 'none',
-              width: '160px',
-            }}
-          />
-          <button
-            onClick={handleTextSearch}
-            disabled={textSearching}
-            style={{
-              padding: '5px 12px',
-              borderRadius: '3px',
-              border: '1px solid #8b4513',
-              backgroundColor: '#5a3d2b',
-              color: '#e8d5b0',
-              cursor: 'pointer',
-              fontSize: '12px',
-              fontFamily: 'Georgia, serif',
-            }}
-          >
+          {/* Edit mode toggle */}
+          {!editMode ? (
+            <button onClick={enterEditMode} style={{ padding: '5px 12px', borderRadius: '3px', border: '1px solid #8b4513', backgroundColor: '#2d5a2e', color: '#e8d5b0', cursor: 'pointer', fontSize: '12px', fontFamily: 'Georgia, serif' }}>
+              {'\u270F'} Edit
+            </button>
+          ) : (
+            <>
+              <button onClick={saveEdits} disabled={savingText} style={{ padding: '5px 12px', borderRadius: '3px', border: '1px solid #8b4513', backgroundColor: '#2d5a2e', color: '#e8d5b0', cursor: 'pointer', fontSize: '12px', fontFamily: 'Georgia, serif' }}>
+                {savingText ? '\u2026' : '\u2714'} Done
+              </button>
+              <button onClick={cancelEdit} style={{ padding: '5px 12px', borderRadius: '3px', border: '1px solid #8b4513', backgroundColor: '#5a3d2b', color: '#e8d5b0', cursor: 'pointer', fontSize: '12px', fontFamily: 'Georgia, serif' }}>
+                {'\u2715'} Cancel
+              </button>
+            </>
+          )}
+          <input value={textSearchQ} onChange={e => setTextSearchQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') handleTextSearch(); }} placeholder="Search in this book\u2026" style={{ padding: '5px 10px', borderRadius: '3px', border: '1px solid #8b4513', backgroundColor: '#faf0dc', color: '#2c1810', fontSize: '12px', fontFamily: 'Georgia, serif', outline: 'none', width: '160px' }} />
+          <button onClick={handleTextSearch} disabled={textSearching} style={{ padding: '5px 12px', borderRadius: '3px', border: '1px solid #8b4513', backgroundColor: '#5a3d2b', color: '#e8d5b0', cursor: 'pointer', fontSize: '12px', fontFamily: 'Georgia, serif' }}>
             {textSearching ? '\u2026' : '\uD83D\uDD0D'}
           </button>
-          {/* Latin/English mode toggle */}
-          <button
-            onClick={() => setReverseMode(m => !m)}
-            title={reverseMode ? 'Switch to Latin→English' : 'Switch to English→Latin'}
-            style={{
-              padding: '5px 8px',
-              borderRadius: '3px',
-              border: '1px solid #8b4513',
-              backgroundColor: reverseMode ? '#2d5a2e' : '#5a3d2b',
-              color: '#e8d5b0',
-              cursor: 'pointer',
-              fontSize: '11px',
-              fontFamily: 'Georgia, serif',
-              fontWeight: 'bold',
-            }}
-          >
+          <button onClick={() => setReverseMode(m => !m)} title={reverseMode ? 'Switch to Latin\u2192English' : 'Switch to English\u2192Latin'} style={{ padding: '5px 8px', borderRadius: '3px', border: '1px solid #8b4513', backgroundColor: reverseMode ? '#2d5a2e' : '#5a3d2b', color: '#e8d5b0', cursor: 'pointer', fontSize: '11px', fontFamily: 'Georgia, serif', fontWeight: 'bold' }}>
             {reverseMode ? 'Eng\u2192Lat' : 'Lat\u2192Eng'}
           </button>
-          {/* Word search */}
-          <input
-            value={searchWord}
-            onChange={e => setSearchWord(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') handleSearchWord(); }}
-            placeholder="Search any Latin word…"
-            style={{
-              padding: '5px 10px',
-              borderRadius: '3px',
-              border: '1px solid #8b4513',
-              backgroundColor: '#faf0dc',
-              color: '#2c1810',
-              fontSize: '12px',
-              fontFamily: 'Georgia, serif',
-              outline: 'none',
-              width: '180px',
-            }}
-          />
-          <button
-            onClick={handleSearchWord}
-            disabled={searchingWord}
-            style={{
-              padding: '5px 12px',
-              borderRadius: '3px',
-              border: '1px solid #8b4513',
-              backgroundColor: '#5a3d2b',
-              color: '#e8d5b0',
-              cursor: 'pointer',
-              fontSize: '12px',
-              fontFamily: 'Georgia, serif',
-            }}
-          >
+          <input value={searchWord} onChange={e => setSearchWord(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') handleSearchWord(); }} placeholder="Search any Latin word\u2026" style={{ padding: '5px 10px', borderRadius: '3px', border: '1px solid #8b4513', backgroundColor: '#faf0dc', color: '#2c1810', fontSize: '12px', fontFamily: 'Georgia, serif', outline: 'none', width: '180px' }} />
+          <button onClick={handleSearchWord} disabled={searchingWord} style={{ padding: '5px 12px', borderRadius: '3px', border: '1px solid #8b4513', backgroundColor: '#5a3d2b', color: '#e8d5b0', cursor: 'pointer', fontSize: '12px', fontFamily: 'Georgia, serif' }}>
             {searchingWord ? '\u2026' : '\uD83D\uDD0D'}
           </button>
         </div>
@@ -593,15 +868,17 @@ export default function ReaderPage() {
           {error && <div style={S.error}>{error}</div>}
           {loading && <div style={S.loading}>Loading book...</div>}
 
-          {/* Text search results */}
+          {editMode && (
+            <div style={{ marginBottom: '12px', padding: '8px 12px', backgroundColor: '#f0e8d0', border: '1px solid #c4a77d', borderRadius: '4px', fontSize: '13px', color: '#6b4c2a' }}>
+              {'\u270F'} Edit mode: edit all text on this page freely. Press <b>Done</b> to save permanently.
+            </div>
+          )}
+
           {textSearchResults !== null && (
             <div style={{ marginBottom: '20px', padding: '10px', backgroundColor: '#faf0dc', border: '1px solid #c4a77d', borderRadius: '4px' }}>
               <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#8b4513', marginBottom: '6px' }}>
                 Search results for "{textSearchQ}"
-                <span
-                  style={{ marginLeft: '10px', cursor: 'pointer', color: '#8b7355', fontWeight: 'normal', fontSize: '12px' }}
-                  onClick={() => setTextSearchResults(null)}
-                >
+                <span style={{ marginLeft: '10px', cursor: 'pointer', color: '#8b7355', fontWeight: 'normal', fontSize: '12px' }} onClick={() => setTextSearchResults(null)}>
                   {'\u2715'} Clear
                 </span>
               </div>
@@ -616,7 +893,7 @@ export default function ReaderPage() {
                     <div style={{ fontSize: '14px', color: '#2c1810', lineHeight: '1.5' }}
                       dangerouslySetInnerHTML={{
                         __html: r.text.substring(0, 200).replace(
-                          new RegExp(`(${textSearchQ.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'),
+                          new RegExp(`(${escapeRegex(textSearchQ)})`, 'gi'),
                           '<mark style="background-color:#f7d44a;color:#2c1810;padding:0 2px;border-radius:2px">$1</mark>'
                         )
                       }}
@@ -632,28 +909,174 @@ export default function ReaderPage() {
             </div>
           )}
 
-          {book?.chapters?.map((ch: ChapterData, ci: number) => (
-            <div key={ci} style={S.chapter}>
-              <div style={S.chapterTitle}>
-                {ch.title || `Chapter ${ch.number}`}
+          {/* Table of Contents — shows ALL chapters (not just current page) */}
+          {allChapters.length > 1 && !editMode && (
+            <div style={{ marginBottom: '8px', border: '1px solid #c4a77d', borderRadius: '4px', overflow: 'hidden' }}>
+              <div
+                onClick={() => setTocOpen(o => !o)}
+                style={{
+                  padding: '8px 12px',
+                  backgroundColor: '#f0e8d0',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  fontSize: '14px',
+                  fontWeight: 'bold',
+                  color: '#8b4513',
+                  fontFamily: 'Georgia, serif',
+                }}
+              >
+                <span>{'\uD83D\uDCD6'} Table of Contents ({allChapters.length})</span>
+                <span style={{ fontSize: '12px', color: '#8b7355' }}>{tocOpen ? '\u25B2' : '\u25BC'}</span>
               </div>
-              {ch.paragraphs.map((para: string, pi: number) => (
-                <div key={pi} style={S.paragraph}>
-                  {renderText(para, handleWordClick)}
+              {tocOpen && (
+                <div style={{ padding: '4px 0', backgroundColor: '#fffcf0', maxHeight: '300px', overflowY: 'auto' }}>
+                  {allChapters.map((ch) => (
+                    <div
+                      key={ch.number}
+                      onClick={() => jumpToChapter(ch.number)}
+                      style={{
+                        padding: '7px 12px',
+                        cursor: 'pointer',
+                        fontSize: '13px',
+                        color: '#6b4c2a',
+                        borderBottom: '1px solid #f0e8d0',
+                        transition: 'background 0.1s',
+                      }}
+                      onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f0e8d0')}
+                      onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+                    >
+                      {ch.title || `Chapter ${ch.number}`}
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
             </div>
-          ))}
+          )}
+
+          {/* Bookmarks panel — separate from TOC */}
+          {!editMode && (
+            <div style={{ marginBottom: '16px', border: '1px solid #c4a77d', borderRadius: '4px', overflow: 'hidden' }}>
+              <div
+                onClick={() => setBookmarkOpen(o => !o)}
+                style={{
+                  padding: '8px 12px',
+                  backgroundColor: '#f0e8d0',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  fontSize: '14px',
+                  fontWeight: 'bold',
+                  color: '#8b4513',
+                  fontFamily: 'Georgia, serif',
+                }}
+              >
+                <span>{'\uD83D\uDCCD'} Bookmarks ({bookmarks.length})</span>
+                <span style={{ fontSize: '12px', color: '#8b7355' }}>{bookmarkOpen ? '\u25B2' : '\u25BC'}</span>
+              </div>
+              {bookmarkOpen && (
+                <div style={{ padding: '4px 0', backgroundColor: '#fffcf0', maxHeight: '300px', overflowY: 'auto' }}>
+                  {bookmarks.length === 0 ? (
+                    <div style={{ padding: '8px 12px', fontSize: '12px', color: '#8b7355', fontStyle: 'italic' }}>
+                      No bookmarks yet. Click a chapter in TOC, then add bookmark.
+                    </div>
+                  ) : (
+                    bookmarks.map((bm) => (
+                      <div
+                        key={bm.chapter}
+                        style={{
+                          padding: '7px 12px',
+                          cursor: 'pointer',
+                          fontSize: '13px',
+                          color: '#6b4c2a',
+                          borderBottom: '1px solid #f0e8d0',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                        }}
+                        onClick={() => jumpToChapter(bm.chapter)}
+                        onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f0e8d0')}
+                        onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+                      >
+                        <span>{'\uD83D\uDCCD'} {bm.label}</span>
+                        <span
+                          onClick={(e) => { e.stopPropagation(); removeBookmark(bm.chapter); }}
+                          style={{ fontSize: '11px', color: '#c0392b', cursor: 'pointer', padding: '2px 6px' }}
+                          title="Remove bookmark"
+                        >
+                          {'\u2715'}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                  {/* Add bookmark button */}
+                  <div
+                    onClick={() => {
+                      // Find current chapter from the book data
+                      if (book && book.chapters.length > 0) {
+                        addBookmark(book.chapters[0].number);
+                      }
+                    }}
+                    style={{
+                      padding: '7px 12px',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      color: '#2d5a2e',
+                      borderTop: '1px solid #e0d0b0',
+                      textAlign: 'center',
+                      fontWeight: 'bold',
+                    }}
+                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f0e8d0')}
+                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+                  >
+                    {'\u2795'} Add Bookmark
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {editMode ? (
+            <textarea
+              value={editFullText}
+              onChange={(e) => setEditFullText(e.target.value)}
+              style={{
+                width: '100%',
+                minHeight: '400px',
+                flex: 1,
+                padding: '12px',
+                fontSize: '16px',
+                lineHeight: '1.8',
+                fontFamily: "'Palatino Linotype', 'Book Antiqua', Palatino, Georgia, serif",
+                border: '1px solid #c4a77d',
+                borderRadius: '4px',
+                backgroundColor: '#fffcf0',
+                color: '#2c1810',
+                resize: 'vertical',
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            />
+          ) : (
+            book?.chapters?.map((ch: ChapterData, ci: number) => (
+              <div key={ci} ref={(el) => { if (el) chapterRefs.current.set(ch.number, el); }} style={S.chapter}>
+                <div style={S.chapterTitle}>{ch.title || `Chapter ${ch.number}`}</div>
+                {ch.paragraphs.map((para: string, pi: number) => (
+                  <div key={pi} style={S.paragraph}>{renderText(para, handleWordClick)}</div>
+                ))}
+              </div>
+            ))
+          )}
 
           {!loading && !error && !book && (
-            <div style={{ color: '#8b7355', fontStyle: 'italic', padding: '20px' }}>
-              Book not found.
-            </div>
+            <div style={{ color: '#8b7355', fontStyle: 'italic', padding: '20px' }}>Book not found.</div>
           )}
         </div>
 
         {/* Right: analysis */}
-        <div style={S.rightPanel}>
+        <div ref={rightPanelRef} style={S.rightPanel}>
           <div style={S.panelHeader}>Word Analysis</div>
           {popup && (
             <div ref={popupRef}>
@@ -662,42 +1085,33 @@ export default function ReaderPage() {
               </div>
               {popup.parses.length > 0 && (
                 <>
-                  <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b7355', marginBottom: '4px' }}>
-                    Analysis
-                  </div>
+                  <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b7355', marginBottom: '4px' }}>Analysis</div>
                   {popup.parses.map((p, i) => (
-                    <ParseResultCard key={i} result={p} onInflect={handleInflect} />
+                    <ParseResultCard key={i} result={p} onInflect={handleInflect} highlight={popup.word} />
                   ))}
                 </>
               )}
               {popup.dict.length > 0 && (
                 <>
-                  <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b7355', marginTop: '8px', marginBottom: '4px' }}>
-                    Dictionary
-                  </div>
+                  <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b7355', marginTop: '8px', marginBottom: '4px' }}>Dictionary</div>
                   {popup.dict.map((d, i) => (
-                    <DictEntryCard key={i} entry={d} />
+                    <DictEntryCard key={i} entry={d} highlight={popup.word} />
                   ))}
                 </>
               )}
               {popup.suggestions && popup.suggestions.length > 0 && (
                 <>
-                  <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b7355', marginTop: '8px', marginBottom: '4px' }}>
-                    Did you mean?
-                  </div>
+                  <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b7355', marginTop: '8px', marginBottom: '4px' }}>Did you mean?</div>
                   {popup.suggestions.map((s, i) => (
-                    <div key={i} style={{ fontSize: '13px', color: '#c4a77d', padding: '2px 0', borderBottom: '1px solid #5a3d2b' }}>
-                      {s}
-                    </div>
+                    <div key={i} style={{ fontSize: '13px', color: '#c4a77d', padding: '2px 0', borderBottom: '1px solid #5a3d2b' }}
+                      dangerouslySetInnerHTML={{ __html: renderSuggestionHtml(s) }}
+                    />
                   ))}
                 </>
               )}
               {popup.parses.length === 0 && popup.dict.length === 0 && (!popup.suggestions || popup.suggestions.length === 0) && (
-                <div style={{ color: '#8b7355', fontStyle: 'italic', fontSize: '13px' }}>
-                  No analysis found.
-                </div>
+                <div style={{ color: '#8b7355', fontStyle: 'italic', fontSize: '13px' }}>No analysis found.</div>
               )}
-              {/* Morphology legend */}
               <details style={{ marginTop: '6px', fontSize: '11px', color: '#8b7355', cursor: 'pointer' }}>
                 <summary style={{ fontStyle: 'italic' }}>What do the codes mean?</summary>
                 <div style={{ marginTop: '4px', lineHeight: '1.6' }}>
@@ -712,29 +1126,21 @@ export default function ReaderPage() {
                 </div>
               </details>
 
-              {/* Inflection table */}
               {inflectTable && (
                 <div style={{ marginTop: '12px', borderTop: '2px solid #8b4513', paddingTop: '8px' }}>
                   <div style={{ fontWeight: 'bold', fontSize: '13px', color: '#d4a76a', marginBottom: '6px' }}>
                     {'\uD83D\uDCCA'} Inflection: {inflectTable.lemma}
-                    <span
-                      style={{ marginLeft: '8px', cursor: 'pointer', color: '#8b7355', fontSize: '11px', fontWeight: 'normal' }}
-                      onClick={() => setInflectTable(null)}
-                    >
+                    <span style={{ marginLeft: '8px', cursor: 'pointer', color: '#8b7355', fontSize: '11px', fontWeight: 'normal' }} onClick={() => setInflectTable(null)}>
                       {'\u2715'} Close
                     </span>
                   </div>
                   {inflectTable.table ? (
                     Object.entries(inflectTable.table).map(([section, rows]) => (
                       <div key={section} style={{ marginBottom: '8px' }}>
-                        <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#8b7355', marginBottom: '2px' }}>
-                          {section}
-                        </div>
+                        <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#8b7355', marginBottom: '2px' }}>{section}</div>
                         {rows.map((row, ri) => (
                           <div key={ri} style={{ fontSize: '12px', color: '#c4a77d', padding: '1px 0', display: 'flex', gap: '8px' }}>
-                            <span style={{ color: '#8b7355', minWidth: '80px' }}>
-                              {row.case || row.person || ''} {row.number || ''}
-                            </span>
+                            <span style={{ color: '#8b7355', minWidth: '80px' }}>{row.case || row.person || ''} {row.number || ''}</span>
                             <span style={{ color: '#e8d5b0' }}>{row.form}</span>
                           </div>
                         ))}
@@ -760,42 +1166,30 @@ export default function ReaderPage() {
       {/* Pagination */}
       {pagination && pagination.total_pages > 1 && (
         <div style={S.pagination}>
-          <button
-            style={pagination.has_prev ? S.pageBtn : S.pageBtnDisabled}
-            disabled={!pagination.has_prev}
-            onClick={() => setPage(p => Math.max(1, p - 1))}
-          >
+          <button style={pagination.has_prev ? S.pageBtn : S.pageBtnDisabled} disabled={!pagination.has_prev} onClick={() => setPage(p => Math.max(1, p - 1))}>
             {'\u25C0'} Prev
           </button>
-          <span style={S.pageInfo}>
-            Page {pagination.page} of {pagination.total_pages}
-          </span>
-          <input
-            type="number"
-            min={1}
-            max={pagination.total_pages}
-            value={pagination.page}
+          <span style={S.pageInfo}>Page {page} of {pagination.total_pages}</span>
+          <input type="number" min={1} max={pagination.total_pages} value={page}
             onChange={(e) => {
               const v = parseInt(e.target.value, 10);
-              if (v >= 1 && v <= pagination.total_pages) setPage(v);
+              if (!isNaN(v) && v >= 1 && v <= pagination.total_pages) setPage(v);
             }}
-            style={{
-              width: '60px',
-              padding: '4px 8px',
-              borderRadius: '3px',
-              border: '1px solid #8b4513',
-              backgroundColor: '#faf0dc',
-              color: '#2c1810',
-              fontSize: '13px',
-              fontFamily: 'Georgia, serif',
-              textAlign: 'center',
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                const v = parseInt((e.target as HTMLInputElement).value, 10);
+                if (v >= 1 && v <= pagination.total_pages) setPage(v);
+              } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                setPage(p => Math.max(1, p - 1));
+              } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                setPage(p => Math.min(pagination.total_pages, p + 1));
+              }
             }}
+            style={{ width: '60px', padding: '4px 8px', borderRadius: '3px', border: '1px solid #8b4513', backgroundColor: '#faf0dc', color: '#2c1810', fontSize: '13px', fontFamily: 'Georgia, serif', textAlign: 'center' }}
           />
-          <button
-            style={pagination.has_next ? S.pageBtn : S.pageBtnDisabled}
-            disabled={!pagination.has_next}
-            onClick={() => setPage(p => p + 1)}
-          >
+          <button style={pagination.has_next ? S.pageBtn : S.pageBtnDisabled} disabled={!pagination.has_next} onClick={() => setPage(p => p + 1)}>
             Next {'\u25B6'}
           </button>
         </div>

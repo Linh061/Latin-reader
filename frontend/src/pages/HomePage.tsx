@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 const API = '';
@@ -170,13 +170,84 @@ export default function HomePage() {
   const [books, setBooks] = useState<BookMeta[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQ, setSearchQ] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [deleteMode, setDeleteMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
 
-  useEffect(() => {
+  const loadBooks = useCallback(() => {
+    setLoading(true);
     fetch(`${API}/api/books`)
       .then(r => r.json())
       .then(data => setBooks(data.books || []))
       .catch(() => {})
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    loadBooks();
+  }, [loadBooks]);
+
+  const handleUpload = useCallback(async (file: File) => {
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch(`${API}/api/books/upload`, {
+        method: 'POST',
+        body: form,
+      });
+      const data = await res.json();
+      if (data.error) {
+        setUploadError(data.error);
+      } else {
+        // Reload book list
+        loadBooks();
+      }
+    } catch (err: any) {
+      setUploadError(`Upload failed: ${err.message}`);
+    } finally {
+      setUploading(false);
+    }
+  }, [loadBooks]);
+
+  const toggleSelect = useCallback((bookId: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(bookId)) {
+        next.delete(bookId);
+      } else {
+        next.add(bookId);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleBatchDelete = useCallback(async () => {
+    if (selectedIds.size === 0) return;
+    if (!window.confirm(`Delete ${selectedIds.size} selected book(s)? This cannot be undone.`)) return;
+    setDeleting(true);
+    try {
+      await Promise.all(
+        Array.from(selectedIds).map(id =>
+          fetch(`${API}/api/books/${id}`, { method: 'DELETE' })
+        )
+      );
+      setSelectedIds(new Set());
+      setDeleteMode(false);
+      loadBooks();
+    } catch (err: any) {
+      alert(`Delete failed: ${err.message}`);
+    } finally {
+      setDeleting(false);
+    }
+  }, [selectedIds, loadBooks]);
+
+  const cancelDeleteMode = useCallback(() => {
+    setDeleteMode(false);
+    setSelectedIds(new Set());
   }, []);
 
   // Filter books by title/author (client-side)
@@ -211,13 +282,98 @@ export default function HomePage() {
         <button style={S.navBtn} onClick={() => navigate('/pdf-reader')}>
           PDF Reader
         </button>
+        {/* Upload book button */}
+        <label
+          style={{
+            ...S.navBtn,
+            opacity: uploading ? 0.6 : 1,
+            cursor: uploading ? 'not-allowed' : 'pointer',
+          }}
+        >
+          {uploading ? '\u23F3 Uploading\u2026' : '\u2795 Upload Book'}
+          <input
+            type="file"
+            accept=".html,.htm,.txt"
+            style={{ display: 'none' }}
+            disabled={uploading}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) handleUpload(f);
+              // Reset so the same file can be re-selected
+              e.target.value = '';
+            }}
+          />
+        </label>
+        <div style={{ fontSize: '11px', color: '#8b7355', fontStyle: 'italic', marginTop: '4px', textAlign: 'center' }}>
+          Supports .html, .htm, .txt files only
+        </div>
       </nav>
 
       {/* Main */}
       <div style={S.main}>
-        <div style={S.sectionTitle}>{'\uD83D\uDCD6'} Books</div>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '20px' }}>
+          <div style={S.sectionTitle}>{'\uD83D\uDCD6'} Books</div>
+          {!deleteMode ? (
+            <button
+              onClick={() => setDeleteMode(true)}
+              style={{
+                padding: '4px 14px',
+                fontSize: '12px',
+                border: '1px solid #c0392b',
+                borderRadius: '4px',
+                backgroundColor: '#faf0dc',
+                color: '#c0392b',
+                cursor: 'pointer',
+                fontFamily: 'Georgia, serif',
+                marginTop: '6px',
+              }}
+            >
+              {'\u2716'} Delete
+            </button>
+          ) : (
+            <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
+              <button
+                onClick={handleBatchDelete}
+                disabled={deleting || selectedIds.size === 0}
+                style={{
+                  padding: '4px 14px',
+                  fontSize: '12px',
+                  border: '1px solid #c0392b',
+                  borderRadius: '4px',
+                  backgroundColor: selectedIds.size > 0 ? '#c0392b' : '#faf0dc',
+                  color: selectedIds.size > 0 ? '#fff' : '#c0392b',
+                  cursor: selectedIds.size > 0 ? 'pointer' : 'default',
+                  fontFamily: 'Georgia, serif',
+                }}
+              >
+                {deleting ? '\u2026' : `\u2714 Delete (${selectedIds.size})`}
+              </button>
+              <button
+                onClick={cancelDeleteMode}
+                style={{
+                  padding: '4px 14px',
+                  fontSize: '12px',
+                  border: '1px solid #8b7355',
+                  borderRadius: '4px',
+                  backgroundColor: '#faf0dc',
+                  color: '#8b7355',
+                  cursor: 'pointer',
+                  fontFamily: 'Georgia, serif',
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
 
         {loading && <div style={S.loading}>Loading books...</div>}
+
+        {uploadError && (
+          <div style={{ color: '#c0392b', fontSize: '13px', padding: '8px 16px', marginBottom: '12px', backgroundColor: '#fce4e4', borderRadius: '4px', maxWidth: '500px' }}>
+            {'\u26A0'} {uploadError}
+          </div>
+        )}
 
         {searchQ.trim() && filteredBooks.length === 0 && !loading && (
           <div style={{ color: '#8b7355', fontStyle: 'italic', padding: '10px', marginBottom: '16px' }}>
@@ -230,14 +386,27 @@ export default function HomePage() {
             <div
               key={book.id}
               style={S.bookCard}
-              onClick={() => navigate(`/reader/${book.id}`)}
+              onClick={() => { if (!deleteMode) navigate(`/reader/${book.id}`); }}
             >
-              <div style={S.bookTitle} dangerouslySetInnerHTML={{ __html: highlightText(book.title, searchQ) }} />
-              <div style={S.bookAuthor} dangerouslySetInnerHTML={{ __html: highlightText(book.author, searchQ) }} />
-              <div style={S.bookDesc}>
-                {book.book_count} books &middot; Click any word to analyze
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
+                {deleteMode && (
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(book.id)}
+                    onChange={() => toggleSelect(book.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    style={{ marginTop: '3px', cursor: 'pointer', accentColor: '#c0392b' }}
+                  />
+                )}
+                <div style={{ flex: 1 }}>
+                  <div style={S.bookTitle} dangerouslySetInnerHTML={{ __html: highlightText(book.title, searchQ) }} />
+                  <div style={S.bookAuthor} dangerouslySetInnerHTML={{ __html: highlightText(book.author, searchQ) }} />
+                  <div style={S.bookDesc}>
+                    {book.book_count} books &middot; Click any word to analyze
+                  </div>
+                  <div style={S.readBtn}>Read</div>
+                </div>
               </div>
-              <div style={S.readBtn}>Read</div>
             </div>
           ))}
         </div>

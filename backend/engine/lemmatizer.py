@@ -1,12 +1,13 @@
 """
-Fast Latin lemmatizer using sqlite3 CLI (thread-safe).
+Fast Latin lemmatizer using Python sqlite3 binding (thread-safe with lock).
 
-Supports exact match + fuzzy search (Levenshtein distance + Latin phonetic normalization).
-Uses sqlite3 CLI subprocess instead of Python sqlite3 bindings to avoid
-thread-safety issues with Flask's debug mode.
+Supports exact match + fuzzy search (prefix + LIKE + Levenshtein distance).
+Uses a threading.Lock to ensure thread safety with Flask debug mode.
 """
 import os
-import subprocess
+import re
+import sqlite3
+import threading
 from typing import Optional, List
 
 DB = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache", "words.db")
@@ -36,10 +37,7 @@ def norm(s: str) -> str:
 # ── Latin phonetic normalization ───────────────────────────────────────────
 
 _PHONETIC_MAP = str.maketrans({
-    'æ': 'e',
-    'œ': 'e',
-    'Æ': 'E',
-    'Œ': 'E',
+    'æ': 'e', 'œ': 'e', 'Æ': 'E', 'Œ': 'E',
 })
 
 
@@ -50,7 +48,6 @@ def _phonetic_norm(s: str) -> str:
     s = s.replace('th', 't').replace('Th', 'T').replace('TH', 'T')
     s = s.replace('ch', 'c').replace('Ch', 'C').replace('CH', 'C')
     s = s.replace('y', 'i').replace('Y', 'I')
-    import re
     s = re.sub(r'(?<![sSxXtT])ti([aeou])', r'ci\1', s)
     s = re.sub(r'(?<![sSxXtT])t[iI]([aeou])', r'ci\1', s)
     return s
@@ -78,77 +75,140 @@ def _levenshtein(a: str, b: str) -> int:
     return prev[-1]
 
 
-# ── SQLite CLI helper ──────────────────────────────────────────────────────
+# ── Thread-safe SQLite connection ──────────────────────────────────────────
 
-def _sql(sql: str) -> str:
-    """Run SQL via sqlite3 CLI (thread-safe)."""
-    try:
-        result = subprocess.run(
-            ["sqlite3", DB, sql],
-            capture_output=True, text=True, timeout=10
-        )
-        return result.stdout
-    except Exception:
-        return ""
+_db_lock = threading.Lock()
+_db_conn: Optional[sqlite3.Connection] = None
+
+
+def _get_conn() -> sqlite3.Connection:
+    global _db_conn
+    if _db_conn is None:
+        if not os.path.exists(DB):
+            raise FileNotFoundError(f"Database not found: {DB}")
+        _db_conn = sqlite3.connect(DB, check_same_thread=False)
+        _db_conn.row_factory = sqlite3.Row
+    return _db_conn
+
+
+def _query(sql: str, params: tuple = ()) -> list[sqlite3.Row]:
+    """Thread-safe query execution."""
+    with _db_lock:
+        c = _get_conn().cursor()
+        c.execute(sql, params)
+        return c.fetchall()
 
 
 # ── Lemmatizer ─────────────────────────────────────────────────────────────
 
 class Lemmatizer:
     def __init__(self):
-        self._all_forms: Optional[List[str]] = None
-        self._all_forms_phon: Optional[List[str]] = None
+        self._all_forms: Optional[list[tuple[str, str]]] = None  # (form, phon_norm)
 
     def _load_forms(self):
         """Load all forms into memory for fuzzy search."""
         if self._all_forms is not None:
             return
-        out = _sql("SELECT DISTINCT form FROM forms;")
-        self._all_forms = [line for line in out.splitlines() if line.strip()]
-        self._all_forms_phon = [_phonetic_norm(f) for f in self._all_forms]
+        rows = _query("SELECT DISTINCT form FROM forms;")
+        self._all_forms = [(r["form"], _phonetic_norm(r["form"])) for r in rows]
 
     def lemmatize(self, word: str) -> List[dict]:
         """Exact match: return list of {lemma, lemma_form, part_of_speech, meaning, translation, morphology}."""
         w = norm(word.lower().strip())
-        safe = w.replace("'", "''")
-        out = _sql(f"""
+        rows = _query("""
             SELECT l.lemma, l.pos, l.meaning, f.morphology
             FROM forms f
             JOIN lemmas l ON f.lemma_id = l.id
-            WHERE f.form = '{safe}'
+            WHERE f.form = ?
             LIMIT 20;
-        """)
+        """, (w,))
         seen = set()
         results = []
-        for line in out.splitlines():
-            parts = line.split("|")
-            if len(parts) < 4:
-                continue
-            lemma = parts[0]
+        for r in rows:
+            lemma = r["lemma"]
             if lemma in seen:
                 continue
             seen.add(lemma)
             results.append({
                 "lemma": lemma,
                 "lemma_form": lemma,
-                "part_of_speech": parts[1],
-                "meaning": parts[2] or "",
-                "translation": parts[2] or "",
-                "morphology": parts[3] or "",
+                "part_of_speech": r["pos"],
+                "meaning": r["meaning"] or "",
+                "translation": r["meaning"] or "",
+                "morphology": r["morphology"] or "",
             })
         return results
 
     def fuzzy_search(self, word: str, max_distance: int = 2, max_results: int = 10) -> List[dict]:
-        """Fuzzy search: find forms within Levenshtein distance, using phonetic normalization."""
-        self._load_forms()
+        """Fuzzy search: try prefix match first, then LIKE, then Levenshtein."""
         w = norm(word.lower().strip())
         w_phon = _phonetic_norm(w)
 
+        # 1. Prefix match (fastest)
+        prefix_rows = _query("""
+            SELECT DISTINCT f.form, l.lemma, l.pos, l.meaning
+            FROM forms f
+            JOIN lemmas l ON f.lemma_id = l.id
+            WHERE f.form LIKE ? || '%'
+            LIMIT ?;
+        """, (w, max_results))
+
+        if prefix_rows:
+            seen = set()
+            results = []
+            for r in prefix_rows:
+                lemma = r["lemma"]
+                if lemma in seen:
+                    continue
+                seen.add(lemma)
+                results.append({
+                    "form": r["form"],
+                    "lemma": lemma,
+                    "part_of_speech": r["pos"],
+                    "meaning": r["meaning"] or "",
+                    "distance": 0,
+                    "highlight": _highlight_ranges(r["form"], w),
+                })
+                if len(results) >= max_results:
+                    break
+            return results
+
+        # 2. LIKE match (contains)
+        like_rows = _query("""
+            SELECT DISTINCT f.form, l.lemma, l.pos, l.meaning
+            FROM forms f
+            JOIN lemmas l ON f.lemma_id = l.id
+            WHERE f.form LIKE '%' || ? || '%'
+            LIMIT ?;
+        """, (w, max_results))
+
+        if like_rows:
+            seen = set()
+            results = []
+            for r in like_rows:
+                lemma = r["lemma"]
+                if lemma in seen:
+                    continue
+                seen.add(lemma)
+                results.append({
+                    "form": r["form"],
+                    "lemma": lemma,
+                    "part_of_speech": r["pos"],
+                    "meaning": r["meaning"] or "",
+                    "distance": 1,
+                    "highlight": _highlight_ranges(r["form"], w),
+                })
+                if len(results) >= max_results:
+                    break
+            return results
+
+        # 3. Levenshtein (slowest, only as last resort)
+        self._load_forms()
         candidates = []
-        for i, f in enumerate(self._all_forms):
-            d = _levenshtein(w_phon, self._all_forms_phon[i])
+        for form, phon in self._all_forms:
+            d = _levenshtein(w_phon, phon)
             if d <= max_distance:
-                candidates.append((d, f))
+                candidates.append((d, form))
 
         candidates.sort(key=lambda x: (x[0], x[1]))
         candidates = candidates[:max_results]
@@ -156,66 +216,84 @@ class Lemmatizer:
         if not candidates:
             return []
 
-        out = []
-        seen_lemmas = set()
+        seen = set()
+        results = []
         for dist, form in candidates:
-            safe = form.replace("'", "''")
-            rows = _sql(f"""
+            rows = _query("""
                 SELECT l.lemma, l.pos, l.meaning
                 FROM forms f
                 JOIN lemmas l ON f.lemma_id = l.id
-                WHERE f.form = '{safe}'
+                WHERE f.form = ?
                 LIMIT 5;
-            """)
-            for line in rows.splitlines():
-                parts = line.split("|")
-                if len(parts) < 3:
+            """, (form,))
+            for r in rows:
+                lemma = r["lemma"]
+                if lemma in seen:
                     continue
-                lemma = parts[0]
-                if lemma in seen_lemmas:
-                    continue
-                seen_lemmas.add(lemma)
-                out.append({
+                seen.add(lemma)
+                results.append({
                     "form": form,
                     "lemma": lemma,
-                    "part_of_speech": parts[1],
-                    "meaning": parts[2] or "",
+                    "part_of_speech": r["pos"],
+                    "meaning": r["meaning"] or "",
                     "distance": dist,
+                    "highlight": _highlight_ranges(form, w),
                 })
-                if len(out) >= max_results:
+                if len(results) >= max_results:
                     break
-            if len(out) >= max_results:
+            if len(results) >= max_results:
                 break
-        return out
+        return results
 
     def prefix_search(self, word: str, max_results: int = 10) -> List[dict]:
         """Prefix match: find forms starting with the given word."""
         w = norm(word.lower().strip())
-        safe = w.replace("'", "''")
-        out = _sql(f"""
+        rows = _query("""
             SELECT DISTINCT f.form, l.lemma, l.pos, l.meaning
             FROM forms f
             JOIN lemmas l ON f.lemma_id = l.id
-            WHERE f.form LIKE '{safe}%'
-            LIMIT {max_results};
-        """)
+            WHERE f.form LIKE ? || '%'
+            LIMIT ?;
+        """, (w, max_results))
         seen = set()
         results = []
-        for line in out.splitlines():
-            parts = line.split("|")
-            if len(parts) < 4:
-                continue
-            lemma = parts[1]
+        for r in rows:
+            lemma = r["lemma"]
             if lemma in seen:
                 continue
             seen.add(lemma)
             results.append({
-                "form": parts[0],
+                "form": r["form"],
                 "lemma": lemma,
-                "part_of_speech": parts[2],
-                "meaning": parts[3] or "",
+                "part_of_speech": r["pos"],
+                "meaning": r["meaning"] or "",
+                "highlight": _highlight_ranges(r["form"], w),
             })
         return results
+
+
+def _highlight_ranges(form: str, query: str) -> list[dict]:
+    """Return highlight ranges for matching characters in form vs query.
+    
+    Returns list of {start, end} (0-based, end-exclusive) for characters
+    in `form` that match the query (case-insensitive prefix match).
+    """
+    fl = form.lower()
+    ql = query.lower()
+    ranges = []
+    i = 0
+    while i < len(fl):
+        # Find the start of a match
+        if fl[i] == ql[0]:
+            j = 0
+            while i + j < len(fl) and j < len(ql) and fl[i + j] == ql[j]:
+                j += 1
+            if j > 0:
+                ranges.append({"start": i, "end": i + j})
+                i += j
+                continue
+        i += 1
+    return ranges
 
 
 _default: Optional[Lemmatizer] = None

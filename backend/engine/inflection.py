@@ -1,9 +1,10 @@
 """
-Inflection table generator using SQLite database (words.db).
+Inflection table generator using sqlite3 CLI subprocess (thread-safe).
 
 Groups forms by morphology codes to build declension/conjugation tables.
 """
-import os, sqlite3
+import os
+import subprocess
 from typing import Optional, List, Dict
 
 DB = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache", "words.db")
@@ -30,6 +31,20 @@ CASE_LABELS: Dict[str, str] = {
 }
 NUM_LABELS: Dict[str, str] = {"S": "Singular", "P": "Plural"}
 GENDER_LABELS: Dict[str, str] = {"M": "Masculine", "F": "Feminine", "N": "Neuter"}
+
+# ── SQLite CLI helper ──────────────────────────────────────────────────────
+
+def _sql(sql: str) -> str:
+    """Run SQL via sqlite3 CLI (thread-safe)."""
+    try:
+        result = subprocess.run(
+            ["sqlite3", DB, sql],
+            capture_output=True, text=True, timeout=10
+        )
+        return result.stdout
+    except Exception:
+        return ""
+
 
 # ── Parser ──────────────────────────────────────────────────────────────────
 
@@ -103,38 +118,38 @@ def form_sort_key(info: dict) -> tuple:
 class Inflector:
     def __init__(self, db: str = DB):
         self.db = db
-        self.conn: Optional[sqlite3.Connection] = None
-
-    def _ready(self):
-        if self.conn is not None:
-            return
-        if not os.path.exists(self.db):
-            raise FileNotFoundError(f"DB missing: {self.db}")
-        self.conn = sqlite3.connect(self.db)
-        self.conn.row_factory = sqlite3.Row
 
     def generate(self, lemma: str) -> Optional[Dict[str, list]]:
         """Generate inflection table for a lemma."""
-        self._ready()
-        c = self.conn.cursor()
-        c.execute("SELECT id, pos FROM lemmas WHERE lemma = ?", (lemma,))
-        row = c.fetchone()
-        if not row:
+        if not os.path.exists(self.db):
             return None
-        lid = row["id"]
-        pos = row["pos"]
 
-        c.execute("SELECT form, morphology FROM forms WHERE lemma_id = ?", (lid,))
-        rows = c.fetchall()
+        # Get lemma id and pos
+        safe = lemma.replace("'", "''")
+        out = _sql(f"SELECT id, pos FROM lemmas WHERE lemma = '{safe}';")
+        lines = [l for l in out.splitlines() if l.strip()]
+        if not lines:
+            return None
+        parts = lines[0].split("|")
+        if len(parts) < 2:
+            return None
+        lid = parts[0]
+        pos = parts[1]
+
+        # Get forms
+        out = _sql(f"SELECT form, morphology FROM forms WHERE lemma_id = {lid};")
+        rows = [l for l in out.splitlines() if l.strip()]
         if not rows:
             return None
 
         entries = []
-        for r in rows:
-            morph = r["morphology"] or ""
+        for line in rows:
+            fp = line.split("|", 1)
+            form = fp[0]
+            morph = fp[1] if len(fp) > 1 else ""
             info = parse_morph(morph)
             entries.append({
-                "form": r["form"],
+                "form": form,
                 "morphology": morph,
                 "info": info,
             })
@@ -176,11 +191,13 @@ class Inflector:
 
 _default: Optional[Inflector] = None
 
+
 def get_inflector() -> Inflector:
     global _default
     if _default is None:
         _default = Inflector()
     return _default
+
 
 def generate_table(lemma: str) -> Optional[Dict[str, list]]:
     return get_inflector().generate(lemma)

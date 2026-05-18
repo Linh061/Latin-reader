@@ -266,6 +266,25 @@ const S: Record<string, React.CSSProperties> = {
   resultMorph: { fontSize: '12px', color: '#7b3f9e' },
 };
 
+// ─── Helper: escape regex ──────────────────────────────────────────────────
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ─── Helper: highlight text (returns JSX) ──────────────────────────────────
+
+function highlightText(text: string, query: string): React.ReactNode {
+  if (!query) return text;
+  const escaped = escapeRegex(query);
+  const parts = text.split(new RegExp(`(${escaped})`, 'gi'));
+  return parts.map((part, i) =>
+    part.toLowerCase() === query.toLowerCase()
+      ? <mark key={i} style={{ backgroundColor: '#f7d44a', color: '#2c1810', padding: '0 2px', borderRadius: '2px' }}>{part}</mark>
+      : part
+  );
+}
+
 // ─── Morphology helper ────────────────────────────────────────────────────
 
 const _MORPH_MAP: Record<string, string> = {
@@ -337,6 +356,13 @@ export default function PDFReaderPage() {
   const [popupSearching, setPopupSearching] = useState(false);
   const [popupReverseMode, setPopupReverseMode] = useState(false); // false=Latin→Eng, true=Eng→Latin
 
+  // Bookmarks
+  const [bookmarks, setBookmarks] = useState<{ page: number; label: string }[]>([]);
+  const [bookmarkOpen, setBookmarkOpen] = useState(false);
+
+  // Bookshelf search
+  const [bookshelfSearch, setBookshelfSearch] = useState('');
+
   // Load bookshelf on mount
   useEffect(() => {
     fetch(`${API}/api/pdf/bookshelf`)
@@ -345,14 +371,33 @@ export default function PDFReaderPage() {
       .catch(() => {});
   }, []);
 
-  // Load page on mount or when params change
+  // Restore last reading position from localStorage on mount
   useEffect(() => {
     if (routePdfId) {
       setCurrentPdfId(routePdfId);
       setShowBookshelf(false);
+      try {
+        const saved = localStorage.getItem(`pdf_progress_${routePdfId}`);
+        if (saved) {
+          const savedPage = parseInt(saved, 10);
+          if (!isNaN(savedPage) && savedPage > 0) {
+            setPageNum(savedPage);
+            return;
+          }
+        }
+      } catch { /* ignore */ }
       setPageNum(1);
     }
   }, [routePdfId]);
+
+  // Save reading progress on every page change
+  useEffect(() => {
+    if (currentPdfId && pageNum > 0) {
+      try {
+        localStorage.setItem(`pdf_progress_${currentPdfId}`, String(pageNum));
+      } catch { /* ignore */ }
+    }
+  }, [currentPdfId, pageNum]);
 
   // ── Race-condition-safe page loading ──────────────────────────────
   // pageToken increments on every page change; stale responses are ignored.
@@ -477,6 +522,29 @@ export default function PDFReaderPage() {
     }
   }, []);
 
+  // Render suggestion with highlight marks
+  const renderSuggestionHtml = (s: any): string => {
+    const form = s.form || '';
+    const lemma = s.lemma || '';
+    const pos = s.part_of_speech || '';
+    const hl = s.highlight || [];
+
+    let formHtml = '';
+    if (hl.length > 0) {
+      let last = 0;
+      for (const r of hl) {
+        formHtml += form.slice(last, r.start);
+        formHtml += `<mark style="background-color:#f7d44a;color:#2c1810;padding:0 2px;border-radius:2px">${form.slice(r.start, r.end)}</mark>`;
+        last = r.end;
+      }
+      formHtml += form.slice(last);
+    } else {
+      formHtml = form;
+    }
+
+    return `${formHtml} (${lemma}, ${pos})`;
+  };
+
   // Search word from nav bar (with fuzzy fallback)
   const handleSearchWord = useCallback(async () => {
     const word = searchWord.trim();
@@ -492,23 +560,17 @@ export default function PDFReaderPage() {
       const data = await res.json();
 
       if (data.exact && data.exact.length > 0) {
-        // Exact match — show analysis
-        const allDict: DictEntry[] = [];
-        for (const pr of data.exact) {
-          const dRes = await fetch(`${API}/api/dict`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key: pr.lemma }),
-          });
-          const dData = await dRes.json();
-          if (dData.results) allDict.push(...dData.results);
-        }
+        // Reuse meaning from fuzzy response — no extra /api/dict calls
         setPopup({
           word,
           x: 60,
           y: 120,
           parses: data.exact,
-          dict: allDict,
+          dict: data.exact.map((pr: any) => ({
+            key: pr.lemma,
+            part_of_speech: pr.part_of_speech,
+            meaning: pr.meaning || '',
+          })),
         });
       } else if (data.fuzzy && data.fuzzy.length > 0) {
         setPopup({
@@ -517,7 +579,7 @@ export default function PDFReaderPage() {
           y: 120,
           parses: [],
           dict: [],
-          suggestions: data.fuzzy.map((f: any) => `${f.form} (${f.lemma}, ${f.part_of_speech})`),
+          suggestions: data.fuzzy,
         });
       } else if (data.prefix && data.prefix.length > 0) {
         setPopup({
@@ -526,7 +588,7 @@ export default function PDFReaderPage() {
           y: 120,
           parses: [],
           dict: [],
-          suggestions: data.prefix.map((f: any) => `${f.form} (${f.lemma}, ${f.part_of_speech})`),
+          suggestions: data.prefix,
         });
       } else {
         setPopup({
@@ -544,6 +606,7 @@ export default function PDFReaderPage() {
       setSearchingWord(false);
     }
   }, [searchWord]);
+
 
   // Click a word -> analyze
   const handleWordClick = useCallback(async (word: string, e: React.MouseEvent) => {
@@ -647,21 +710,16 @@ export default function PDFReaderPage() {
         const data = await res.json();
 
         if (data.exact && data.exact.length > 0) {
-          const allDict: DictEntry[] = [];
-          for (const pr of data.exact) {
-            const dRes = await fetch(`${API}/api/dict`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ key: pr.lemma }),
-            });
-            const dData = await dRes.json();
-            if (dData.results) allDict.push(...dData.results);
-          }
+          // Reuse meaning from fuzzy response — no extra /api/dict calls
           setPopup(prev => prev ? {
             ...prev,
             word,
             parses: data.exact,
-            dict: allDict,
+            dict: data.exact.map((pr: any) => ({
+              key: pr.lemma,
+              part_of_speech: pr.part_of_speech,
+              meaning: pr.meaning || '',
+            })),
             suggestions: undefined,
           } : null);
         } else if (data.fuzzy && data.fuzzy.length > 0) {
@@ -670,7 +728,7 @@ export default function PDFReaderPage() {
             word,
             parses: [],
             dict: [],
-            suggestions: data.fuzzy.map((f: any) => `${f.form} (${f.lemma}, ${f.part_of_speech})`),
+            suggestions: data.fuzzy,
           } : null);
         } else if (data.prefix && data.prefix.length > 0) {
           setPopup(prev => prev ? {
@@ -678,7 +736,7 @@ export default function PDFReaderPage() {
             word,
             parses: [],
             dict: [],
-            suggestions: data.prefix.map((f: any) => `${f.form} (${f.lemma}, ${f.part_of_speech})`),
+            suggestions: data.prefix,
           } : null);
         } else {
           setPopup(prev => prev ? {
@@ -705,10 +763,75 @@ export default function PDFReaderPage() {
       }
     };
     if (popup) {
-      document.addEventListener('mousedown', handler);
-      return () => document.removeEventListener('mousedown', handler);
+      document.addEventListener('click', handler);
+      return () => document.removeEventListener('click', handler);
     }
   }, [popup]);
+
+  // ── Bookmarks ──────────────────────────────────────────────────────
+
+  // Load bookmarks
+  const loadBookmarks = useCallback(async (pid: string) => {
+    try {
+      const res = await fetch(`${API}/api/pdf/${pid}/bookmark`);
+      const data = await res.json();
+      if (data.bookmarks) setBookmarks(data.bookmarks);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Add bookmark
+  const addBookmark = useCallback(async (page: number) => {
+    if (!currentPdfId) return;
+    try {
+      const res = await fetch(`${API}/api/pdf/${currentPdfId}/bookmark`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page, label: `Page ${page}` }),
+      });
+      const data = await res.json();
+      if (data.bookmarks) setBookmarks(data.bookmarks);
+    } catch {
+      // ignore
+    }
+  }, [currentPdfId]);
+
+  // Remove bookmark
+  const removeBookmark = useCallback(async (page: number) => {
+    if (!currentPdfId) return;
+    try {
+      const res = await fetch(`${API}/api/pdf/${currentPdfId}/bookmark`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page }),
+      });
+      const data = await res.json();
+      if (data.bookmarks) setBookmarks(data.bookmarks);
+    } catch {
+      // ignore
+    }
+  }, [currentPdfId]);
+
+  // Load bookmarks when PDF changes
+  useEffect(() => {
+    if (currentPdfId) {
+      loadBookmarks(currentPdfId);
+    }
+  }, [currentPdfId, loadBookmarks]);
+
+  // ── Keyboard shortcuts: ← → for page navigation ────────────────────
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowLeft' && pageNum > 1) {
+        goToPage(pageNum - 1);
+      } else if (e.key === 'ArrowRight' && pageNum < totalPages) {
+        goToPage(pageNum + 1);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [pageNum, totalPages, goToPage]);
 
   // Render OCR text with clickable words
   const renderOcrText = () => {
@@ -750,10 +873,34 @@ export default function PDFReaderPage() {
           Select a book to read, or upload a new PDF
         </div>
 
+        {/* Bookshelf search bar */}
+        <input
+          value={bookshelfSearch}
+          onChange={e => setBookshelfSearch(e.target.value)}
+          placeholder="Search books by title\u2026"
+          style={{
+            padding: '8px 14px',
+            borderRadius: '4px',
+            border: '1px solid #8b4513',
+            backgroundColor: '#faf0dc',
+            color: '#2c1810',
+            fontSize: '14px',
+            fontFamily: 'Georgia, serif',
+            outline: 'none',
+            width: '300px',
+            maxWidth: '80%',
+          }}
+        />
+
         {/* Bookshelf grid */}
         {books.length > 0 && (
           <div style={S.bookshelfGrid}>
-            {books.map(book => (
+            {books
+              .filter(book => {
+                if (!bookshelfSearch.trim()) return true;
+                return book.title.toLowerCase().includes(bookshelfSearch.toLowerCase());
+              })
+              .map(book => (
               <div
                 key={book.pdf_id}
                 style={S.bookCard}
@@ -901,6 +1048,25 @@ export default function PDFReaderPage() {
           {searchingWord ? '\u2026' : '\uD83D\uDD0D'}
         </button>
 
+        {/* Bookmark button */}
+        <button
+          onClick={() => setBookmarkOpen(o => !o)}
+          style={{
+            padding: '5px 10px',
+            borderRadius: '3px',
+            border: '1px solid #8b4513',
+            backgroundColor: bookmarkOpen ? '#2d5a2e' : '#5a3d2b',
+            color: '#e8d5b0',
+            cursor: 'pointer',
+            fontSize: '11px',
+            fontFamily: 'Georgia, serif',
+            position: 'relative',
+          }}
+          title={`Bookmarks (${bookmarks.length})`}
+        >
+          {'\uD83D\uDCCD'} {bookmarks.length}
+        </button>
+
         <div style={S.modelToggle}>
           <button
             style={modelType === 'print' ? S.modelBtnActive : S.modelBtn}
@@ -916,6 +1082,71 @@ export default function PDFReaderPage() {
           </button>
         </div>
       </nav>
+
+      {/* Bookmark panel (dropdown below nav) */}
+      {bookmarkOpen && (
+        <div style={{
+          backgroundColor: '#2c1810',
+          borderBottom: '2px solid #8b4513',
+          padding: '8px 20px',
+          display: 'flex',
+          gap: '8px',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+        }}>
+          <span style={{ color: '#d4a76a', fontSize: '12px', fontWeight: 'bold', fontFamily: 'Georgia, serif' }}>
+            {'\uD83D\uDCCD'} Bookmarks:
+          </span>
+          {bookmarks.length === 0 ? (
+            <span style={{ color: '#8b7355', fontSize: '12px', fontStyle: 'italic' }}>
+              No bookmarks yet. Click {'\u2795'} to add current page.
+            </span>
+          ) : (
+            bookmarks.map(bm => (
+              <span
+                key={bm.page}
+                onClick={() => { goToPage(bm.page); setBookmarkOpen(false); }}
+                style={{
+                  padding: '3px 8px',
+                  borderRadius: '3px',
+                  border: '1px solid #8b4513',
+                  backgroundColor: bm.page === pageNum ? '#d4a76a' : '#5a3d2b',
+                  color: bm.page === pageNum ? '#1a0f08' : '#e8d5b0',
+                  cursor: 'pointer',
+                  fontSize: '11px',
+                  fontFamily: 'Georgia, serif',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                }}
+              >
+                {bm.label}
+                <span
+                  onClick={(e) => { e.stopPropagation(); removeBookmark(bm.page); }}
+                  style={{ color: '#c0392b', cursor: 'pointer', fontSize: '10px' }}
+                >
+                  {'\u2715'}
+                </span>
+              </span>
+            ))
+          )}
+          <button
+            onClick={() => { addBookmark(pageNum); }}
+            style={{
+              padding: '3px 8px',
+              borderRadius: '3px',
+              border: '1px solid #386e3a',
+              backgroundColor: '#2d5a2e',
+              color: '#ffffff',
+              cursor: 'pointer',
+              fontSize: '11px',
+              fontFamily: 'Georgia, serif',
+            }}
+          >
+            {'\u2795'} Page {pageNum}
+          </button>
+        </div>
+      )}
 
       {/* Main content */}
       <div style={{ position: 'relative', flex: 1, display: 'flex', overflow: 'hidden' }}>
@@ -1032,7 +1263,19 @@ export default function PDFReaderPage() {
               value={pageNum}
               onChange={(e) => {
                 const v = parseInt(e.target.value, 10);
-                if (v >= 1 && v <= totalPages) goToPage(v);
+                if (!isNaN(v) && v >= 1 && v <= totalPages) goToPage(v);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const v = parseInt((e.target as HTMLInputElement).value, 10);
+                  if (v >= 1 && v <= totalPages) goToPage(v);
+                } else if (e.key === 'ArrowLeft') {
+                  e.preventDefault();
+                  goToPage(pageNum - 1);
+                } else if (e.key === 'ArrowRight') {
+                  e.preventDefault();
+                  goToPage(pageNum + 1);
+                }
               }}
               style={{
                 width: '60px',
@@ -1151,7 +1394,7 @@ export default function PDFReaderPage() {
               {popup.parses.map((p, i) => (
                 <div key={i} style={S.resultCard}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div style={S.resultLemma}>{p.lemma_form}</div>
+                    <div style={S.resultLemma}>{highlightText(p.lemma_form, popup.word)}</div>
                     <button
                       onClick={(e) => { e.stopPropagation(); handleInflect(p.lemma); }}
                       title="Show inflection table"
@@ -1187,7 +1430,7 @@ export default function PDFReaderPage() {
               </div>
               {popup.dict.map((d, i) => (
                 <div key={i} style={S.resultCard}>
-                  <div style={S.resultLemma}>{d.key}</div>
+                  <div style={S.resultLemma}>{highlightText(d.key, popup.word)}</div>
                   <div style={S.resultPos}>{d.part_of_speech}</div>
                   <div style={{ fontSize: '12px', color: '#2c1810' }}>{d.meaning}</div>
                 </div>
@@ -1200,9 +1443,9 @@ export default function PDFReaderPage() {
                 Did you mean?
               </div>
               {popup.suggestions.map((s, i) => (
-                <div key={i} style={{ fontSize: '13px', color: '#6b4c2a', padding: '2px 0', borderBottom: '1px solid #c4a77d' }}>
-                  {s}
-                </div>
+                <div key={i} style={{ fontSize: '13px', color: '#6b4c2a', padding: '2px 0', borderBottom: '1px solid #c4a77d' }}
+                  dangerouslySetInnerHTML={{ __html: renderSuggestionHtml(s) }}
+                />
               ))}
             </div>
           )}

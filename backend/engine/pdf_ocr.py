@@ -612,6 +612,59 @@ class PDFProcessor:
             logger.exception("OCR failed for page")
             return {"full_text": "", "lines": [], "error": str(e)}
 
+    # ── Bookmarks ──────────────────────────────────────────────────────
+
+    def get_bookmarks(self, pdf_id: str) -> list:
+        """Get all bookmarks for a PDF. Returns list of {page, label}."""
+        pdf_path, total_pages, title, db_path = self._find_pdf(pdf_id)
+        if pdf_path is None or db_path is None:
+            return []
+        try:
+            conn = self._get_conn(db_path)
+            cur = conn.execute("SELECT data FROM ocr_cache WHERE cache_key = ?", (f"{pdf_id}_bookmarks",))
+            row = cur.fetchone()
+            if row:
+                return json.loads(row[0])
+        except Exception:
+            pass
+        return []
+
+    def add_bookmark(self, pdf_id: str, page: int, label: str = "") -> dict:
+        """Add a bookmark for a PDF page. Returns updated bookmark list."""
+        pdf_path, total_pages, title, db_path = self._find_pdf(pdf_id)
+        if pdf_path is None:
+            return {"error": "PDF not found"}
+        if db_path is None:
+            return {"error": "No cache database found"}
+        bookmarks = self.get_bookmarks(pdf_id)
+        # Avoid duplicates
+        bookmarks = [b for b in bookmarks if b.get("page") != page]
+        bookmarks.append({"page": page, "label": label or f"Page {page}"})
+        conn = self._get_conn(db_path)
+        conn.execute(
+            "INSERT OR REPLACE INTO ocr_cache (cache_key, data, created_at) VALUES (?, ?, ?)",
+            (f"{pdf_id}_bookmarks", json.dumps(bookmarks), int(time.time())),
+        )
+        conn.commit()
+        return {"success": True, "bookmarks": bookmarks}
+
+    def remove_bookmark(self, pdf_id: str, page: int) -> dict:
+        """Remove a bookmark for a PDF page. Returns updated bookmark list."""
+        pdf_path, total_pages, title, db_path = self._find_pdf(pdf_id)
+        if pdf_path is None:
+            return {"error": "PDF not found"}
+        if db_path is None:
+            return {"error": "No cache database found"}
+        bookmarks = self.get_bookmarks(pdf_id)
+        bookmarks = [b for b in bookmarks if b.get("page") != page]
+        conn = self._get_conn(db_path)
+        conn.execute(
+            "INSERT OR REPLACE INTO ocr_cache (cache_key, data, created_at) VALUES (?, ?, ?)",
+            (f"{pdf_id}_bookmarks", json.dumps(bookmarks), int(time.time())),
+        )
+        conn.commit()
+        return {"success": True, "bookmarks": bookmarks}
+
     def _do_ocr_and_cache(self, pdf_id: str, pdf_path: str, page_num: int, model_type: str, db_path: str, title: str):
         """Run OCR on a page and cache result. Runs in background thread."""
         try:
