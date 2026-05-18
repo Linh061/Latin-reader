@@ -919,7 +919,7 @@ export default function PDFReaderPage() {
                     <div style={S.bookCoverPlaceholder}>{'\uD83D\uDCD6'}</div>
                   )}
                 </div>
-                <div style={S.bookTitle}>{book.title}</div>
+                  <div style={S.bookTitle}>{highlightText(book.title, bookshelfSearch)}</div>
                 <div style={S.bookPages}>{book.total_pages} pages</div>
                 <button
                   onClick={(e) => handleDeleteBook(book.pdf_id, e)}
