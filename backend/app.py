@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from engine.lemmatizer import get_lemmatizer, lemmatize, fuzzy_search, prefix_search
 from engine.dictionary import get_dictionary, lookup, reverse_lookup
 from engine.inflection import generate_table
+from engine.english_latin import lookup as english_latin_lookup
 from engine.ocr import ocr_image, ocr_image_with_analysis
 from engine.pdf_ocr import get_pdf_processor
 from books import load_book, list_books, search_books, save_book_text, import_book_file, delete_book
@@ -262,6 +263,69 @@ def reverse_dict():
             "query": word,
             "results": results,
             "count": len(results),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/english-latin", methods=["POST"])
+def english_latin():
+    """
+    English → Latin dictionary lookup.
+
+    Combines results from:
+    1. Smith & Hall (1871) — dedicated English→Latin dictionary
+    2. Whitaker's Words — reverse lookup via English meaning LIKE match
+
+    Request JSON:
+        word: str - The English word to search for
+        max_results: int (optional) - Max results (default 30)
+
+    Returns:
+        query: the original English query
+        results: list of {english, latin_definition, source}
+        count: number of results
+    """
+    data = request.get_json()
+    if not data or "word" not in data:
+        return jsonify({"error": "Missing 'word' parameter"}), 400
+
+    word = data["word"].strip()
+    if not word:
+        return jsonify({"error": "Empty word"}), 400
+
+    max_results = data.get("max_results", 30)
+
+    try:
+        # 1. Smith & Hall results
+        sh_results = english_latin_lookup(word, max_results)
+
+        # 2. Whitaker reverse lookup results
+        wh_results = reverse_lookup(word, max_results)
+
+        # Merge: Smith & Hall first, then Whitaker (deduplicated by latin key)
+        seen_keys: set[str] = set()
+        merged = []
+        for r in sh_results:
+            key = r.get("english", "").lower()
+            if key not in seen_keys:
+                seen_keys.add(key)
+                merged.append({**r, "source": "Smith & Hall 1871"})
+
+        for r in wh_results:
+            key = r.get("key", "").lower()
+            if key not in seen_keys:
+                seen_keys.add(key)
+                merged.append({
+                    "english": r.get("key", ""),
+                    "latin_definition": r.get("meaning", ""),
+                    "source": "Whitaker's Words",
+                })
+
+        return jsonify({
+            "query": word,
+            "results": merged[:max_results],
+            "count": min(len(merged), max_results),
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500

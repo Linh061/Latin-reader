@@ -38,6 +38,7 @@ export interface InflectionTable {
     case?: string;
     person?: string;
     number?: string;
+    gender?: string;
     form: string;
   }[];
 }

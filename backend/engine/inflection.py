@@ -127,29 +127,77 @@ class Inflector:
         if not os.path.exists(self.db):
             return None
 
-        # Get lemma id and pos
+        # Get all matching lemma ids
         safe = lemma.replace("'", "''")
         out = _sql(f"SELECT id, pos FROM lemmas WHERE lemma = '{safe}';")
         lines = [l for l in out.splitlines() if l.strip()]
         if not lines:
             return None
-        parts = lines[0].split("|")
-        if len(parts) < 2:
-            return None
-        lid = parts[0]
-        pos = parts[1]
 
-        # Get forms
-        out = _sql(f"SELECT form, morphology FROM forms WHERE lemma_id = {lid};")
-        rows = [l for l in out.splitlines() if l.strip()]
-        if not rows:
+        # Parts of speech that don't have inflections (conjunctions, prepositions,
+        # adverbs, interjections, etc.) — return None immediately.
+        NON_INFLECTABLE = {'Conjunction', 'Preposition', 'Adverb', 'Interjection',
+                           'Prefix', 'Suffix', 'Punctuation', 'Numeral'}
+        for line in lines:
+            parts = line.split("|")
+            if len(parts) >= 2:
+                pos = parts[1].strip()
+                if pos in NON_INFLECTABLE:
+                    return None
+
+        # Try each lemma_id, pick the one with the most forms
+        best_lid = None
+        best_rows: list[str] = []
+        for line in lines:
+            parts = line.split("|")
+            if len(parts) < 1:
+                continue
+            lid = parts[0].strip()
+            out2 = _sql(f"SELECT form, morphology FROM forms WHERE lemma_id = {lid};")
+            rows2 = [l for l in out2.splitlines() if l.strip()]
+            if len(rows2) > len(best_rows):
+                best_lid = lid
+                best_rows = rows2
+
+        # If no forms found, try stripping verb endings: differo -> differ
+        # Only do this if the lemma is long enough (>3 chars) to avoid
+        # matching short words like "ut" (conjunction) as verb stems.
+        if not best_rows and len(lemma) > 3:
+            for suffix in ['o', 're', 'is', 'it', 'mus', 'tis', 'nt', 'ri', 'ror']:
+                if lemma.endswith(suffix) and len(lemma) > len(suffix) + 1:
+                    stem = lemma[:-len(suffix)]
+                    out2 = _sql(f"SELECT id FROM lemmas WHERE lemma = '{stem.replace(chr(39), chr(39)+chr(39))}';")
+                    stem_lines = [l for l in out2.splitlines() if l.strip()]
+                    for sl in stem_lines:
+                        sid = sl.strip()
+                        out3 = _sql(f"SELECT form, morphology FROM forms WHERE lemma_id = {sid};")
+                        rows3 = [l for l in out3.splitlines() if l.strip()]
+                        if len(rows3) > len(best_rows):
+                            best_lid = sid
+                            best_rows = rows3
+                    if best_rows:
+                        break
+
+        if not best_rows:
             return None
 
+        # Deduplicate by (form, morphology)
+        seen: set[tuple[str, str]] = set()
         entries = []
-        for line in rows:
+        for line in best_rows:
             fp = line.split("|", 1)
             form = fp[0]
             morph = fp[1] if len(fp) > 1 else ""
+            key = (form, morph)
+            if key in seen:
+                continue
+            seen.add(key)
+            # Skip entries with empty morphology (like the base form "un" itself)
+            if not morph:
+                continue
+            # Skip placeholder forms (Collatinus uses "zzz" prefix for unknown forms)
+            if form.startswith('zzz'):
+                continue
             info = parse_morph(morph)
             entries.append({
                 "form": form,
@@ -157,14 +205,16 @@ class Inflector:
                 "info": info,
             })
 
-        # Group by tense+voice or case+number
+        # Group by tense+voice or case+number+gender
         groups: Dict[str, list] = {}
         for e in entries:
             info = e["info"]
             if "tense" in info and "voice" in info:
                 group = f"{info.get('tense','?')} {info.get('voice','?')}"
             elif "case" in info and "number" in info:
-                group = f"{info.get('number','?')}"
+                # Include gender in group name to separate M/F/N
+                gender = info.get("gender", "")
+                group = f"{info.get('number','?')}{' ' + gender if gender else ''}"
             elif "case" in info:
                 group = "Cases"
             elif "form" in info:
@@ -187,6 +237,8 @@ class Inflector:
                     row_entry["person"] = i["person"]
                 if "number" in i:
                     row_entry["number"] = i["number"]
+                if "gender" in i:
+                    row_entry["gender"] = i["gender"]
                 table[g].append(row_entry)
 
         return table if table else None

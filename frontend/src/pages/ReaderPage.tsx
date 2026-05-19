@@ -343,7 +343,6 @@ function ParseResultCard({ result, onInflect, highlight, onSaveVocab, onRemoveVo
         </div>
       </div>
       <div style={S.pos}>{result.part_of_speech}</div>
-      {result.morphology && <div style={S.morphology}>{result.morphology}</div>}
       {result.translation && <div style={S.translation}>{result.translation}</div>}
     </div>
   );
@@ -611,7 +610,7 @@ export default function ReaderPage() {
     setPopup(null);
     try {
       if (reverseMode) {
-        const res = await fetch(`${API}/api/reverse`, {
+        const res = await fetch(`${API}/api/english-latin`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ word }),
@@ -623,9 +622,9 @@ export default function ReaderPage() {
           y: 120,
           parses: [],
           dict: (data.results || []).map((r: any) => ({
-            key: r.key,
-            part_of_speech: r.part_of_speech,
-            meaning: r.meaning,
+            key: r.english,
+            part_of_speech: '',
+            meaning: r.latin_definition,
           })),
         });
       } else {
@@ -1245,7 +1244,12 @@ export default function ReaderPage() {
                 <>
                   <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b7355', marginBottom: '4px' }}>Analysis</div>
                   {popup.parses.map((p, i) => (
-                    <ParseResultCard key={i} result={p} onInflect={handleInflect} onSaveVocab={handleSaveVocab} onRemoveVocab={handleRemoveVocab} isSaved={isVocabSaved(p.lemma)} highlight={popup.word} />
+                    <div key={i}>
+                      {i === 0 && p.morphology && (
+                        <div style={{ ...S.morphology, marginBottom: '8px' }}>{p.morphology}</div>
+                      )}
+                      <ParseResultCard result={p} onInflect={handleInflect} onSaveVocab={handleSaveVocab} onRemoveVocab={handleRemoveVocab} isSaved={isVocabSaved(p.lemma)} highlight={popup.word} />
+                    </div>
                   ))}
                 </>
               )}
@@ -1307,13 +1311,19 @@ export default function ReaderPage() {
                   {inflectTable.table ? (
                     Object.entries(inflectTable.table).map(([section, rows]) => (
                       <div key={section} style={{ marginBottom: '8px' }}>
-                        <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#8b7355', marginBottom: '2px' }}>{section}</div>
-                        {rows.map((row, ri) => (
-                          <div key={ri} style={{ fontSize: '12px', color: '#c4a77d', padding: '1px 0', display: 'flex', gap: '8px' }}>
-                            <span style={{ color: '#8b7355', minWidth: '80px' }}>{row.case || row.person || ''} {row.number || ''}</span>
-                            <span style={{ color: '#e8d5b0' }}>{row.form}</span>
-                          </div>
-                        ))}
+                        <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#8b7355', marginBottom: '4px' }}>{section}</div>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                          <tbody>
+                            {rows.map((row, ri) => (
+                              <tr key={ri} style={{ borderBottom: '1px solid #4a3320' }}>
+                                <td style={{ color: '#8b7355', padding: '2px 8px 2px 0', whiteSpace: 'nowrap', verticalAlign: 'top', width: '110px' }}>
+                                  {row.case || row.person || ''} {row.number || ''}{row.gender ? ' ' + row.gender : ''}
+                                </td>
+                                <td style={{ color: '#e8d5b0', padding: '2px 0' }}>{row.form}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                       </div>
                     ))
                   ) : (
@@ -1516,7 +1526,7 @@ export default function ReaderPage() {
                                           <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#6b4c2a', marginBottom: '1px' }}>{section}</div>
                                           {rows.slice(0, 6).map((row, ri) => (
                                             <div key={ri} style={{ fontSize: '11px', color: '#c4a77d', padding: '1px 0', display: 'flex', gap: '6px' }}>
-                                              <span style={{ color: '#8b7355', minWidth: '70px' }}>{row.case || row.person || ''} {row.number || ''}</span>
+                                              <span style={{ color: '#8b7355', minWidth: '80px' }}>{row.case || row.person || ''} {row.number || ''}{row.gender ? ' ' + row.gender : ''}</span>
                                               <span style={{ color: '#e8d5b0' }}>{row.form}</span>
                                             </div>
                                           ))}

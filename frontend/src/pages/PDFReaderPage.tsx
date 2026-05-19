@@ -572,8 +572,8 @@ export default function PDFReaderPage() {
     setPopup(null);
     try {
       if (reverseMode) {
-        // English → Latin reverse lookup
-        const res = await fetch(`${API}/api/reverse`, {
+        // English → Latin dictionary lookup (Smith & Hall 1871)
+        const res = await fetch(`${API}/api/english-latin`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ word }),
@@ -585,9 +585,9 @@ export default function PDFReaderPage() {
           y: 120,
           parses: [],
           dict: (data.results || []).map((r: any) => ({
-            key: r.key,
-            part_of_speech: r.part_of_speech,
-            meaning: r.meaning,
+            key: r.english,
+            part_of_speech: '',
+            meaning: r.latin_definition,
           })),
         });
       } else {
@@ -731,8 +731,8 @@ export default function PDFReaderPage() {
     setPopupSearching(true);
     try {
       if (popupReverseMode) {
-        // English → Latin reverse lookup
-        const res = await fetch(`${API}/api/reverse`, {
+        // English → Latin dictionary lookup (Smith & Hall 1871)
+        const res = await fetch(`${API}/api/english-latin`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ word }),
@@ -743,9 +743,9 @@ export default function PDFReaderPage() {
           word,
           parses: [],
           dict: (data.results || []).map((r: any) => ({
-            key: r.key,
-            part_of_speech: r.part_of_speech,
-            meaning: r.meaning,
+            key: r.english,
+            part_of_speech: '',
+            meaning: r.latin_definition,
           })),
           suggestions: undefined,
         } : null);
@@ -1631,7 +1631,7 @@ export default function PDFReaderPage() {
                                           <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#6b4c2a', marginBottom: '1px' }}>{section}</div>
                                           {rows.slice(0, 6).map((row, ri) => (
                                             <div key={ri} style={{ fontSize: '11px', color: '#c4a77d', padding: '1px 0', display: 'flex', gap: '6px' }}>
-                                              <span style={{ color: '#8b7355', minWidth: '70px' }}>{row.case || row.person || ''} {row.number || ''}</span>
+                                              <span style={{ color: '#8b7355', minWidth: '80px' }}>{row.case || row.person || ''} {row.number || ''}{row.gender ? ' ' + row.gender : ''}</span>
                                               <span style={{ color: '#e8d5b0' }}>{row.form}</span>
                                             </div>
                                           ))}
@@ -1739,58 +1739,60 @@ export default function PDFReaderPage() {
                 Analysis
               </div>
               {popup.parses.map((p, i) => (
-                <div key={i} style={S.resultCard}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div style={S.resultLemma}>{highlightText(p.lemma_form, popup.word)}</div>
-                    <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (isVocabSaved(p.lemma)) {
-                            handleRemoveVocab(p.lemma);
-                          } else {
-                            handleSaveVocab(p.lemma, p.part_of_speech, p.translation, p.lemma_form);
-                          }
-                        }}
-                        title={isVocabSaved(p.lemma) ? 'Remove from vocabulary' : 'Save to vocabulary'}
-                        style={{
-                          padding: '1px 6px',
-                          fontSize: '10px',
-                          border: '1px solid #8b4513',
-                          borderRadius: '3px',
-                          backgroundColor: isVocabSaved(p.lemma) ? '#2d5a2e' : '#5a3d2b',
-                          color: '#e8d5b0',
-                          cursor: 'pointer',
-                          fontFamily: 'Georgia, serif',
-                        }}
-                      >
-                        {isVocabSaved(p.lemma) ? '\u2605' : '\u2606'}
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleInflect(p.lemma); }}
-                        title="Show inflection table"
-                        style={{
-                          padding: '1px 6px',
-                          fontSize: '10px',
-                          border: '1px solid #8b4513',
-                          borderRadius: '3px',
-                          backgroundColor: '#5a3d2b',
-                          color: '#e8d5b0',
-                          cursor: 'pointer',
-                          fontFamily: 'Georgia, serif',
-                        }}
-                      >
-                        {'\uD83D\uDCCA'} Inflect
-                      </button>
+                <div key={i}>
+                  {i === 0 && p.morphology && (
+                    <div style={{ ...S.resultMorph, marginBottom: '8px' }}>{_morphologyLabel(p.morphology)}</div>
+                  )}
+                  <div style={S.resultCard}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={S.resultLemma}>{highlightText(p.lemma_form, popup.word)}</div>
+                      <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (isVocabSaved(p.lemma)) {
+                              handleRemoveVocab(p.lemma);
+                            } else {
+                              handleSaveVocab(p.lemma, p.part_of_speech, p.translation, p.lemma_form);
+                            }
+                          }}
+                          title={isVocabSaved(p.lemma) ? 'Remove from vocabulary' : 'Save to vocabulary'}
+                          style={{
+                            padding: '1px 6px',
+                            fontSize: '10px',
+                            border: '1px solid #8b4513',
+                            borderRadius: '3px',
+                            backgroundColor: isVocabSaved(p.lemma) ? '#2d5a2e' : '#5a3d2b',
+                            color: '#e8d5b0',
+                            cursor: 'pointer',
+                            fontFamily: 'Georgia, serif',
+                          }}
+                        >
+                          {isVocabSaved(p.lemma) ? '\u2605' : '\u2606'}
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleInflect(p.lemma); }}
+                          title="Show inflection table"
+                          style={{
+                            padding: '1px 6px',
+                            fontSize: '10px',
+                            border: '1px solid #8b4513',
+                            borderRadius: '3px',
+                            backgroundColor: '#5a3d2b',
+                            color: '#e8d5b0',
+                            cursor: 'pointer',
+                            fontFamily: 'Georgia, serif',
+                          }}
+                        >
+                          {'\uD83D\uDCCA'} Inflect
+                        </button>
+                      </div>
                     </div>
+                    <div style={S.resultPos}>{p.part_of_speech}</div>
+                    {p.translation && (
+                      <div style={S.resultTrans}>{p.translation}</div>
+                    )}
                   </div>
-                  <div style={S.resultPos}>{p.part_of_speech}</div>
-                  {p.morphology && (
-                    <div style={S.resultMorph}>{_morphologyLabel(p.morphology)}</div>
-                  )}
-                  {p.translation && (
-                    <div style={S.resultTrans}>{p.translation}</div>
-                  )}
                 </div>
               ))}
             </div>
@@ -1872,8 +1874,8 @@ export default function PDFReaderPage() {
                     </div>
                     {rows.map((row, ri) => (
                       <div key={ri} style={{ fontSize: '12px', color: '#6b4c2a', padding: '1px 0', display: 'flex', gap: '8px' }}>
-                        <span style={{ color: '#8b7355', minWidth: '80px' }}>
-                          {row.case || row.person || ''} {row.number || ''}
+                        <span style={{ color: '#8b7355', minWidth: '100px' }}>
+                          {row.case || row.person || ''} {row.number || ''}{row.gender ? ' ' + row.gender : ''}
                         </span>
                         <span style={{ color: '#2c1810' }}>{row.form}</span>
                       </div>
