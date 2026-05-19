@@ -122,3 +122,33 @@ export interface PdfStatusResponse {
   cached_pages: number;
   error?: string;
 }
+
+/** Fuzzy search suggestion type */
+export interface Suggestion {
+  form: string;
+  lemma: string;
+  part_of_speech: string;
+  highlight: { start: number; end: number }[];
+}
+
+/** Vocabulary (生词本) types */
+
+
+export interface VocabEntry {
+  lemma: string;
+  lemma_form: string;
+  pos: string;
+  meaning: string;
+  added_at: string;
+}
+
+export interface VocabListResponse {
+  vocab: VocabEntry[];
+  count: number;
+}
+
+export interface VocabAddResponse {
+  message: string;
+  vocab: VocabEntry[];
+  count: number;
+}

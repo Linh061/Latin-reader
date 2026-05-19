@@ -27,6 +27,12 @@ import time
 
 from typing import Optional
 
+try:
+    from PIL import Image
+    _HAS_PIL = True
+except ImportError:
+    _HAS_PIL = False
+
 logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "pdf_books")
@@ -110,6 +116,29 @@ def _find_model(relpath: str) -> Optional[str]:
             if relpath in files:
                 return os.path.join(root, relpath)
     return None
+
+
+def _compress_to_jpeg(pix: "fitz.Pixmap", quality: int = 85) -> bytes:
+    """Convert a fitz Pixmap to JPEG bytes, compatible with all PyMuPDF versions.
+    
+    PyMuPDF < 1.25.3 does not support the `quality` kwarg in tobytes(),
+    so we use PIL as a fallback for JPEG compression.
+    """
+    try:
+        # Try direct JPEG output (PyMuPDF >= 1.25.3)
+        return pix.tobytes("jpeg", quality=quality)
+    except TypeError:
+        # Fallback: PNG → PIL → JPEG
+        png_bytes = pix.tobytes("png")
+        if _HAS_PIL:
+            import io
+            from PIL import Image as PILImage
+            pil_img = PILImage.open(io.BytesIO(png_bytes))
+            buf = io.BytesIO()
+            pil_img.save(buf, format="JPEG", quality=quality)
+            return buf.getvalue()
+        # No PIL available — return PNG (no compression, but works)
+        return png_bytes
 
 
 def _build_kraken_cmd(image_path: str, output_path: str, model_type: str) -> list[str]:
@@ -212,29 +241,43 @@ class PDFProcessor:
             data.update(cached=True, page_num=page_num, total_pages=total_pages, title=title)
             return data
 
-        # Check SQLite cache
+        # Check SQLite cache (OCR text only — page_img is NOT stored in DB)
         conn = self._get_conn(db_path)
         cur = conn.execute("SELECT data FROM ocr_cache WHERE cache_key = ?", (cache_key,))
         cached = cur.fetchone()
         if cached:
             data = json.loads(cached[0])
+            # Re-render page image (fast, ~0.1s) since we don't cache images in DB
+            try:
+                import fitz
+                doc = fitz.open(pdf_path)
+                page = doc.load_page(page_num - 1)
+                pix = page.get_pixmap(dpi=200)
+                img_bytes = _compress_to_jpeg(pix)
+                data["page_img"] = base64.b64encode(img_bytes).decode("ascii")
+                doc.close()
+            except Exception:
+                pass
             data.update(cached=True, page_num=page_num, total_pages=total_pages, title=title)
             self._in_memory[cache_key] = data
             return data
 
-        # Render page image (fast, ~0.1s)
+        # Render page image (fast, ~0.1s) — use JPEG at 85% quality to save space
         try:
             import fitz
             doc = fitz.open(pdf_path)
             page = doc.load_page(page_num - 1)
             pix = page.get_pixmap(dpi=200)
-            img_bytes = pix.tobytes("png")
+            img_bytes = _compress_to_jpeg(pix)
             page_b64 = base64.b64encode(img_bytes).decode("ascii")
             doc.close()
         except Exception as e:
             return {"error": f"Failed to render page: {e}"}
 
         # Return image immediately; no OCR text yet
+        # NOTE: page_img is NOT cached in SQLite — only kept in memory.
+        # Rendering is fast (~0.1s) so we re-render on each request.
+        # This keeps the cache DB small (OCR text only, not images).
         data = {
             "page_img": page_b64,
             "ocr_text": "",
@@ -246,13 +289,6 @@ class PDFProcessor:
             "cached": False,
             "ocr_pending": True,
         }
-
-        # Save partial (image only) to SQLite
-        conn.execute(
-            "INSERT OR REPLACE INTO ocr_cache (cache_key, data, created_at) VALUES (?, ?, ?)",
-            (cache_key, json.dumps({"page_img": page_b64}, ensure_ascii=False), int(time.time())),
-        )
-        conn.commit()
 
         # Kick off OCR in background
         threading.Thread(
@@ -428,21 +464,21 @@ class PDFProcessor:
             conn.execute("DELETE FROM ocr_cache WHERE cache_key = ?", (cache_key,))
             conn.commit()
 
-        # Re-run OCR synchronously
+        # Re-run OCR synchronously — use JPEG at 85% quality to save space
         try:
             import fitz
             doc = fitz.open(pdf_path)
             page = doc.load_page(page_num - 1)
             dpi = 600
             pix = page.get_pixmap(dpi=dpi)
-            img_bytes = pix.tobytes("png")
+            img_bytes = _compress_to_jpeg(pix)
             page_b64 = base64.b64encode(img_bytes).decode("ascii")
             doc.close()
 
             ocr_result = self._ocr_bytes(img_bytes, model_type)
 
+            # Only cache OCR text + lines — NOT page_img
             cache_data = {
-                "page_img": page_b64,
                 "ocr_text": ocr_result.get("full_text", ""),
                 "lines": ocr_result.get("lines", []),
             }
@@ -467,6 +503,8 @@ class PDFProcessor:
                     cache_data["ocr_text"] = row[0]
                     user_edited = True
 
+            # Include page_img in the response (not cached, re-rendered)
+            cache_data["page_img"] = page_b64
             cache_data.update({
                 "cached": True,
                 "page_num": page_num,
@@ -615,7 +653,7 @@ class PDFProcessor:
     # ── Bookmarks ──────────────────────────────────────────────────────
 
     def get_bookmarks(self, pdf_id: str) -> list:
-        """Get all bookmarks for a PDF. Returns list of {page, label}."""
+        """Get all bookmarks for a PDF. Returns list of {page, label}, sorted by page."""
         pdf_path, total_pages, title, db_path = self._find_pdf(pdf_id)
         if pdf_path is None or db_path is None:
             return []
@@ -624,7 +662,10 @@ class PDFProcessor:
             cur = conn.execute("SELECT data FROM ocr_cache WHERE cache_key = ?", (f"{pdf_id}_bookmarks",))
             row = cur.fetchone()
             if row:
-                return json.loads(row[0])
+                bookmarks = json.loads(row[0])
+                # Sort by page number ascending
+                bookmarks.sort(key=lambda b: b.get("page", 0))
+                return bookmarks
         except Exception:
             pass
         return []
@@ -673,14 +714,15 @@ class PDFProcessor:
             page = doc.load_page(page_num - 1)
             dpi = 600
             pix = page.get_pixmap(dpi=dpi)
-            img_bytes = pix.tobytes("png")
+            img_bytes = _compress_to_jpeg(pix)
             doc.close()
 
             ocr_result = self._ocr_bytes(img_bytes, model_type)
-            page_b64 = base64.b64encode(img_bytes).decode("ascii")
 
+            # Only cache OCR text + lines — NOT page_img.
+            # page_img is re-rendered on each request (~0.1s per page).
+            # This keeps the cache DB small (text only, not images).
             cache_data = {
-                "page_img": page_b64,
                 "ocr_text": ocr_result.get("full_text", ""),
                 "lines": ocr_result.get("lines", []),
             }

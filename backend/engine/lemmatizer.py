@@ -218,13 +218,22 @@ class Lemmatizer:
             if lemma in seen:
                 continue
             seen.add(lemma)
+            # Try to find a real inflected form from forms table
+            # so we show "chemia" instead of the stem "chemi"
+            form_rows = _query("""
+                SELECT f.form FROM forms f
+                JOIN lemmas l ON f.lemma_id = l.id
+                WHERE l.lemma = ?
+                LIMIT 1;
+            """, (lemma,))
+            lemma_form = form_rows[0]["form"] if form_rows else w
             # Convert morphology code (e.g. "IMF3P") to human-readable text
             morph_raw = r["morphology"] or ""
             morph_info = parse_morph(morph_raw)
             morph_readable = ", ".join(v for v in morph_info.values() if v)
             results.append({
                 "lemma": lemma,
-                "lemma_form": lemma,
+                "lemma_form": lemma_form,  # Use real form from forms table if available
                 "part_of_speech": r["pos"],
                 "meaning": r["meaning"] or "",
                 "translation": r["meaning"] or "",
@@ -234,36 +243,73 @@ class Lemmatizer:
 
 
     def fuzzy_search(self, word: str, max_distance: int = 2, max_results: int = 10) -> List[dict]:
-        """Fuzzy search: try prefix match first, then LIKE, then Levenshtein."""
+        """Fuzzy search: try exact lemma match first, then prefix, then LIKE, then Levenshtein.
+
+        Exact match is tried first so that typing 'chem' returns only the lemma
+        'chem' (clam/cockle), not 'chemi' (chemistry) or 'chemic' (chemist).
+        """
         w = norm(word.lower().strip())
         w_phon = _phonetic_norm(w)
 
-        # 1. Prefix match (fastest)
-        prefix_rows = _query("""
-            SELECT DISTINCT f.form, f.morphology, l.lemma, l.pos, l.meaning
+        # 1. Exact lemma match (most relevant)
+        # Try to find a real inflected form from forms table first,
+        # so we show "chemia" instead of the stem "chemi"
+        exact_rows = _query("""
+            SELECT l.lemma, l.pos, l.meaning
+            FROM lemmas l
+            WHERE l.lemma = ?
+            LIMIT ?;
+        """, (w, max_results))
+        if exact_rows:
+            seen = set()
+            results = []
+            for r in exact_rows:
+                lemma = r["lemma"]
+                if lemma in seen:
+                    continue
+                seen.add(lemma)
+                # Try to find a real inflected form from forms table
+                form_rows = _query("""
+                    SELECT f.form FROM forms f
+                    JOIN lemmas l ON f.lemma_id = l.id
+                    WHERE l.lemma = ?
+                    LIMIT 1;
+                """, (lemma,))
+                display_form = form_rows[0]["form"] if form_rows else r["lemma"]
+                results.append({
+                    "form": display_form,
+                    "lemma": lemma,
+                    "part_of_speech": r["pos"],
+                    "meaning": r["meaning"] or "",
+                    "morphology": "",
+                    "distance": 0,
+                    "highlight": _highlight_ranges(display_form, w),
+                })
+            return results
+
+        # 2. Forms prefix match — first try to find inflected forms that start with the query
+        #    This ensures typing a partial word returns real Latin words, not lemma stems.
+        form_rows = _query("""
+            SELECT DISTINCT f.form, l.lemma, l.pos, l.meaning
             FROM forms f
             JOIN lemmas l ON f.lemma_id = l.id
             WHERE f.form LIKE ? || '%'
             LIMIT ?;
         """, (w, max_results))
-
-        if prefix_rows:
+        if form_rows:
             seen = set()
             results = []
-            for r in prefix_rows:
+            for r in form_rows:
                 lemma = r["lemma"]
                 if lemma in seen:
                     continue
                 seen.add(lemma)
-                morph_raw = r["morphology"] or ""
-                morph_info = parse_morph(morph_raw)
-                morph_readable = ", ".join(v for v in morph_info.values() if v)
                 results.append({
                     "form": r["form"],
                     "lemma": lemma,
                     "part_of_speech": r["pos"],
                     "meaning": r["meaning"] or "",
-                    "morphology": morph_readable or morph_raw,
+                    "morphology": "",
                     "distance": 0,
                     "highlight": _highlight_ranges(r["form"], w),
                 })
@@ -271,40 +317,7 @@ class Lemmatizer:
                     break
             return results
 
-        # 2. LIKE match (contains)
-        like_rows = _query("""
-            SELECT DISTINCT f.form, f.morphology, l.lemma, l.pos, l.meaning
-            FROM forms f
-            JOIN lemmas l ON f.lemma_id = l.id
-            WHERE f.form LIKE '%' || ? || '%'
-            LIMIT ?;
-        """, (w, max_results))
-
-        if like_rows:
-            seen = set()
-            results = []
-            for r in like_rows:
-                lemma = r["lemma"]
-                if lemma in seen:
-                    continue
-                seen.add(lemma)
-                morph_raw = r["morphology"] or ""
-                morph_info = parse_morph(morph_raw)
-                morph_readable = ", ".join(v for v in morph_info.values() if v)
-                results.append({
-                    "form": r["form"],
-                    "lemma": lemma,
-                    "part_of_speech": r["pos"],
-                    "meaning": r["meaning"] or "",
-                    "morphology": morph_readable or morph_raw,
-                    "distance": 1,
-                    "highlight": _highlight_ranges(r["form"], w),
-                })
-                if len(results) >= max_results:
-                    break
-            return results
-
-        # 3. Fallback: try lemmas table (for indeclinable words not in forms)
+        # 3. Lemma prefix match — fallback to lemma stems only if no forms found
         lemma_rows = _query("""
             SELECT lemma, pos, meaning FROM lemmas
             WHERE lemma LIKE ? || '%'
@@ -331,7 +344,36 @@ class Lemmatizer:
                     break
             return results
 
-        # 4. Levenshtein (slowest, only as last resort)
+        # 4. LIKE match (contains) — match against lemmas
+        like_rows = _query("""
+            SELECT DISTINCT lemma, pos, meaning FROM lemmas
+            WHERE lemma LIKE '%' || ? || '%'
+            LIMIT ?;
+        """, (w, max_results))
+
+        if like_rows:
+            seen = set()
+            results = []
+            for r in like_rows:
+                lemma = r["lemma"]
+                if lemma in seen:
+                    continue
+                seen.add(lemma)
+                results.append({
+                    "form": r["lemma"],
+                    "lemma": lemma,
+                    "part_of_speech": r["pos"],
+                    "meaning": r["meaning"] or "",
+                    "morphology": "",
+                    "distance": 1,
+                    "highlight": _highlight_ranges(r["lemma"], w),
+                })
+                if len(results) >= max_results:
+                    break
+            return results
+
+        # 5. Levenshtein (slowest, only as last resort)
+
         self._load_forms()
 
         candidates = []
@@ -375,10 +417,17 @@ class Lemmatizer:
                 break
         return results
 
+
     def prefix_search(self, word: str, max_results: int = 10) -> List[dict]:
-        """Prefix match: find forms starting with the given word."""
+        """Prefix match: find real Latin words starting with the given prefix.
+
+        First tries forms table (inflected forms) to return real Latin words,
+        then falls back to lemma stems only if no forms match.
+        """
         w = norm(word.lower().strip())
-        rows = _query("""
+
+        # Primary: match against inflected forms (real Latin words)
+        form_rows = _query("""
             SELECT DISTINCT f.form, l.lemma, l.pos, l.meaning
             FROM forms f
             JOIN lemmas l ON f.lemma_id = l.id
@@ -387,7 +436,7 @@ class Lemmatizer:
         """, (w, max_results))
         seen = set()
         results = []
-        for r in rows:
+        for r in form_rows:
             lemma = r["lemma"]
             if lemma in seen:
                 continue
@@ -400,7 +449,7 @@ class Lemmatizer:
                 "highlight": _highlight_ranges(r["form"], w),
             })
 
-        # Fallback: try lemmas table (for indeclinable words not in forms)
+        # Fallback: try lemma stems if no forms matched
         if not results:
             lemma_rows = _query("""
                 SELECT lemma, pos, meaning FROM lemmas
@@ -421,6 +470,7 @@ class Lemmatizer:
                 })
 
         return results
+
 
 
 

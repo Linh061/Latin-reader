@@ -11,6 +11,7 @@ Provides API endpoints for:
 import os
 import re
 import sys
+import json
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
@@ -880,6 +881,93 @@ def pdf_status(pdf_id: str):
     try:
         proc = get_pdf_processor()
         return jsonify(proc.get_status(pdf_id))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Vocabulary (生词本) ─────────────────────────────────────────────────────
+
+VOCAB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           'cache', 'vocab.json')
+
+
+def _load_vocab() -> list:
+    """Load vocabulary list from JSON file."""
+    if not os.path.exists(VOCAB_FILE):
+        return []
+    try:
+        with open(VOCAB_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_vocab(vocab: list):
+    """Save vocabulary list to JSON file."""
+    os.makedirs(os.path.dirname(VOCAB_FILE), exist_ok=True)
+    with open(VOCAB_FILE, 'w', encoding='utf-8') as f:
+        json.dump(vocab, f, ensure_ascii=False, indent=2)
+
+
+@app.route("/api/vocab", methods=["GET"])
+def vocab_list():
+    """Get all saved vocabulary entries, sorted by added_at descending."""
+    try:
+        vocab = _load_vocab()
+        # Sort by added_at descending (newest first)
+        vocab.sort(key=lambda v: v.get("added_at", ""), reverse=True)
+        return jsonify({"vocab": vocab, "count": len(vocab)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/vocab", methods=["POST"])
+def vocab_add():
+    """Add a word to vocabulary.
+
+    Request JSON:
+        lemma: str - The dictionary lemma (stem)
+        lemma_form: str - The original word form as clicked by user
+        pos: str - Part of speech
+        meaning: str - Translation/meaning
+    """
+    data = request.get_json()
+    if not data or "lemma" not in data:
+        return jsonify({"error": "Missing 'lemma' parameter"}), 400
+
+    lemma = data["lemma"].strip()
+    if not lemma:
+        return jsonify({"error": "Empty lemma"}), 400
+
+    try:
+        vocab = _load_vocab()
+        # Check if already exists
+        for entry in vocab:
+            if entry["lemma"] == lemma:
+                return jsonify({"message": "Already in vocabulary", "vocab": vocab, "count": len(vocab)})
+
+        from datetime import datetime, timezone
+        vocab.append({
+            "lemma": lemma,
+            "lemma_form": data.get("lemma_form", lemma),
+            "pos": data.get("pos", ""),
+            "meaning": data.get("meaning", ""),
+            "added_at": datetime.now(timezone.utc).isoformat(),
+        })
+        _save_vocab(vocab)
+        return jsonify({"message": "Added", "vocab": vocab, "count": len(vocab)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/vocab/<lemma>", methods=["DELETE"])
+def vocab_remove(lemma: str):
+    """Remove a word from vocabulary."""
+    try:
+        vocab = _load_vocab()
+        vocab = [e for e in vocab if e["lemma"] != lemma]
+        _save_vocab(vocab)
+        return jsonify({"message": "Removed", "vocab": vocab, "count": len(vocab)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

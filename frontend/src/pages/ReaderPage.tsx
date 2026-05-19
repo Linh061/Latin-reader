@@ -7,7 +7,10 @@ import type {
   DictEntry,
   AnalyzeResponse,
   InflectResponse,
+  VocabEntry,
+  Suggestion,
 } from '../types/latin';
+
 
 const API = '';
 
@@ -281,29 +284,63 @@ function renderWords(text: string, onClick: (word: string, e: React.MouseEvent) 
 
 // ─── Helper Components ─────────────────────────────────────────────────────
 
-function ParseResultCard({ result, onInflect, highlight }: { result: ParseResult; onInflect?: (lemma: string) => void; highlight?: string }) {
+function ParseResultCard({ result, onInflect, highlight, onSaveVocab, onRemoveVocab, isSaved }: {
+  result: ParseResult;
+  onInflect?: (lemma: string) => void;
+  highlight?: string;
+  onSaveVocab?: (lemma: string, pos: string, meaning: string, lemma_form?: string) => void;
+  onRemoveVocab?: (lemma: string) => void;
+  isSaved?: boolean;
+}) {
   return (
     <div style={S.resultCard}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={S.lemma}>{highlightText(result.lemma_form, highlight || '')}</div>
-        {onInflect && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onInflect(result.lemma); }}
-            title="Show inflection table"
-            style={{
-              padding: '1px 6px',
-              fontSize: '10px',
-              border: '1px solid #8b4513',
-              borderRadius: '3px',
-              backgroundColor: '#5a3d2b',
-              color: '#e8d5b0',
-              cursor: 'pointer',
-              fontFamily: 'Georgia, serif',
-            }}
-          >
-            {'\uD83D\uDCCA'} Inflect
-          </button>
-        )}
+        <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+          {(onSaveVocab || onRemoveVocab) && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (isSaved && onRemoveVocab) {
+                  onRemoveVocab(result.lemma);
+                } else if (!isSaved && onSaveVocab) {
+                  onSaveVocab(result.lemma, result.part_of_speech, result.translation, result.lemma_form);
+                }
+              }}
+              title={isSaved ? 'Remove from vocabulary' : 'Save to vocabulary'}
+              style={{
+                padding: '1px 6px',
+                fontSize: '10px',
+                border: '1px solid #8b4513',
+                borderRadius: '3px',
+                backgroundColor: isSaved ? '#2d5a2e' : '#5a3d2b',
+                color: '#e8d5b0',
+                cursor: 'pointer',
+                fontFamily: 'Georgia, serif',
+              }}
+            >
+              {isSaved ? '\u2605' : '\u2606'}
+            </button>
+          )}
+          {onInflect && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onInflect(result.lemma); }}
+              title="Show inflection table"
+              style={{
+                padding: '1px 6px',
+                fontSize: '10px',
+                border: '1px solid #8b4513',
+                borderRadius: '3px',
+                backgroundColor: '#5a3d2b',
+                color: '#e8d5b0',
+                cursor: 'pointer',
+                fontFamily: 'Georgia, serif',
+              }}
+            >
+              {'\uD83D\uDCCA'} Inflect
+            </button>
+          )}
+        </div>
       </div>
       <div style={S.pos}>{result.part_of_speech}</div>
       {result.morphology && <div style={S.morphology}>{result.morphology}</div>}
@@ -359,8 +396,9 @@ export default function ReaderPage() {
     y: number;
     parses: ParseResult[];
     dict: DictEntry[];
-    suggestions?: any[];
+    suggestions?: Suggestion[];
   } | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const popupRef = useRef<HTMLDivElement>(null);
@@ -400,6 +438,16 @@ export default function ReaderPage() {
   const [allChapters, setAllChapters] = useState<{ number: number; title: string }[]>([]);
   const [bookmarks, setBookmarks] = useState<{ chapter: number; label: string }[]>([]);
   const chapterRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
+  // ── Vocabulary (生词本) state ─────────────────────────────────────────────
+  const [vocab, setVocab] = useState<VocabEntry[]>([]);
+  const [vocabOpen, setVocabOpen] = useState(false);
+  const [vocabLoading, setVocabLoading] = useState(false);
+  const [vocabSearch, setVocabSearch] = useState('');
+  const [expandedVocab, setExpandedVocab] = useState<Record<string, boolean>>({});
+  const [collapsedDates, setCollapsedDates] = useState<Record<string, boolean>>({});
+  const [vocabInflect, setVocabInflect] = useState<Record<string, InflectResponse['table'] | null>>({});
+  const [vocabInflecting, setVocabInflecting] = useState<Record<string, boolean>>({});
 
   // Load full chapter list (for TOC) — separate from paginated content
   const loadChapterList = useCallback(async (id: string) => {
@@ -606,8 +654,12 @@ export default function ReaderPage() {
             x: 60,
             y: 120,
             parses: [],
-            dict: [],
-            suggestions: data.fuzzy,
+            dict: data.fuzzy.map((r: any) => ({
+              key: r.lemma || r.form,
+              part_of_speech: r.part_of_speech,
+              meaning: r.meaning || '',
+            })),
+            suggestions: undefined,
           });
         } else if (data.prefix && data.prefix.length > 0) {
           setPopup({
@@ -615,8 +667,12 @@ export default function ReaderPage() {
             x: 60,
             y: 120,
             parses: [],
-            dict: [],
-            suggestions: data.prefix,
+            dict: data.prefix.map((r: any) => ({
+              key: r.lemma || r.form,
+              part_of_speech: r.part_of_speech,
+              meaning: r.meaning || '',
+            })),
+            suggestions: undefined,
           });
         } else {
           setPopup({
@@ -743,6 +799,60 @@ export default function ReaderPage() {
       setInflecting(null);
     }
   }, []);
+
+  // ── Vocabulary handlers ──────────────────────────────────────────────────
+
+  const loadVocab = useCallback(async () => {
+    setVocabLoading(true);
+    try {
+      const res = await fetch(`${API}/api/vocab`);
+      const data = await res.json();
+      if (data.vocab) setVocab(data.vocab);
+    } catch {
+      // ignore
+    } finally {
+      setVocabLoading(false);
+    }
+  }, []);
+
+  const handleSaveVocab = useCallback(async (lemma: string, pos: string, meaning: string, lemma_form?: string) => {
+    try {
+      const res = await fetch(`${API}/api/vocab`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lemma, lemma_form: lemma_form || lemma, pos, meaning }),
+      });
+      const data = await res.json();
+      if (data.vocab) {
+        setVocab(data.vocab);
+      } else {
+        console.error('Save vocab: unexpected response', data);
+      }
+    } catch (err) {
+      console.error('Save vocab failed:', err);
+    }
+  }, []);
+
+  const handleRemoveVocab = useCallback(async (lemma: string) => {
+    try {
+      const res = await fetch(`${API}/api/vocab/${encodeURIComponent(lemma)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (data.vocab) setVocab(data.vocab);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const isVocabSaved = useCallback((lemma: string): boolean => {
+    return vocab.some(v => v.lemma === lemma);
+  }, [vocab]);
+
+  // Load vocab on mount
+  useEffect(() => {
+    loadVocab();
+  }, [loadVocab]);
 
   // Close popup only when clicking on the left panel's text area (not on interactive elements)
   useEffect(() => {
@@ -1135,15 +1245,7 @@ export default function ReaderPage() {
                 <>
                   <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b7355', marginBottom: '4px' }}>Analysis</div>
                   {popup.parses.map((p, i) => (
-                    <ParseResultCard key={i} result={p} onInflect={handleInflect} highlight={popup.word} />
-                  ))}
-                </>
-              )}
-              {popup.dict.length > 0 && (
-                <>
-                  <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b7355', marginTop: '8px', marginBottom: '4px' }}>Dictionary</div>
-                  {popup.dict.map((d, i) => (
-                    <DictEntryCard key={i} entry={d} highlight={popup.word} />
+                    <ParseResultCard key={i} result={p} onInflect={handleInflect} onSaveVocab={handleSaveVocab} onRemoveVocab={handleRemoveVocab} isSaved={isVocabSaved(p.lemma)} highlight={popup.word} />
                   ))}
                 </>
               )}
@@ -1151,13 +1253,33 @@ export default function ReaderPage() {
                 <>
                   <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b7355', marginTop: '8px', marginBottom: '4px' }}>Did you mean?</div>
                   {popup.suggestions.map((s, i) => (
-                    <div key={i} style={{ fontSize: '13px', color: '#c4a77d', padding: '2px 0', borderBottom: '1px solid #5a3d2b' }}
+                    <div
+                      key={i}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const lemma = s.lemma || s.form || '';
+                        if (lemma) {
+                          handleWordClick(lemma, e);
+                        }
+                      }}
+                      style={{ fontSize: '13px', color: '#c4a77d', padding: '4px 0', borderBottom: '1px solid #5a3d2b', cursor: 'pointer', transition: 'background 0.1s' }}
+                      onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#4a3320')}
+                      onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
                       dangerouslySetInnerHTML={{ __html: renderSuggestionHtml(s) }}
                     />
                   ))}
+
                 </>
               )}
-              {popup.parses.length === 0 && popup.dict.length === 0 && (!popup.suggestions || popup.suggestions.length === 0) && (
+              {popup.dict.length > 0 && popup.parses.length === 0 && (
+                <>
+                  <div style={{ fontWeight: 'bold', fontSize: '12px', color: '#8b7355', marginTop: '8px', marginBottom: '4px' }}>Dictionary Results</div>
+                  {popup.dict.map((d, i) => (
+                    <DictEntryCard key={i} entry={d} highlight={popup.word} />
+                  ))}
+                </>
+              )}
+              {popup.parses.length === 0 && (!popup.suggestions || popup.suggestions.length === 0) && popup.dict.length === 0 && (
                 <div style={{ color: '#8b7355', fontStyle: 'italic', fontSize: '13px' }}>No analysis found.</div>
               )}
               <details style={{ marginTop: '6px', fontSize: '11px', color: '#8b7355', cursor: 'pointer' }}>
@@ -1208,6 +1330,215 @@ export default function ReaderPage() {
               Click any Latin word to analyze.
             </div>
           )}
+
+          {/* ── Vocabulary (生词本) panel ─────────────────────────────────── */}
+          <div style={{ marginTop: '16px', borderTop: '2px solid #8b4513', paddingTop: '12px' }}>
+            <div
+              onClick={() => { setVocabOpen(o => !o); if (!vocabOpen) loadVocab(); }}
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                cursor: 'pointer',
+                fontSize: '14px',
+                fontWeight: 'bold',
+                color: '#d4a76a',
+                fontFamily: 'Georgia, serif',
+              }}
+            >
+              <span>{'\uD83D\uDCD6'} Vocabulary ({vocab.length})</span>
+              <span style={{ fontSize: '12px', color: '#8b7355' }}>{vocabOpen ? '\u25B2' : '\u25BC'}</span>
+            </div>
+            {vocabOpen && (
+              <div style={{ marginTop: '8px', maxHeight: '400px', overflowY: 'auto' }}>
+                {/* Search bar */}
+                <input
+                  value={vocabSearch}
+                  onChange={e => setVocabSearch(e.target.value)}
+                  placeholder="Search saved words\u2026"
+                  style={{
+                    width: '100%',
+                    padding: '5px 8px',
+                    borderRadius: '3px',
+                    border: '1px solid #8b4513',
+                    backgroundColor: '#faf0dc',
+                    color: '#2c1810',
+                    fontSize: '12px',
+                    fontFamily: 'Georgia, serif',
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                    marginBottom: '8px',
+                  }}
+                />
+                {vocabLoading ? (
+                  <div style={{ color: '#8b7355', fontStyle: 'italic', fontSize: '12px' }}>Loading...</div>
+                ) : vocab.length === 0 ? (
+                  <div style={{ color: '#8b7355', fontStyle: 'italic', fontSize: '12px' }}>
+                    No saved words yet. Click {'\u2606'} on any analysis to save.
+                  </div>
+                ) : (() => {
+                  // Filter by search
+                  const q = vocabSearch.toLowerCase().trim();
+                  const filtered = q
+                    ? vocab.filter(v => v.lemma.toLowerCase().includes(q) || v.meaning.toLowerCase().includes(q))
+                    : vocab;
+
+                  if (filtered.length === 0) {
+                    return <div style={{ color: '#8b7355', fontStyle: 'italic', fontSize: '12px' }}>No matching words.</div>;
+                  }
+
+                  // Group by date
+                  const groups: Record<string, VocabEntry[]> = {};
+                  const today = new Date();
+                  const todayStr = today.toISOString().slice(0, 10);
+                  const yesterday = new Date(today);
+                  yesterday.setDate(yesterday.getDate() - 1);
+                  const yesterdayStr = yesterday.toISOString().slice(0, 10);
+
+                  for (const v of filtered) {
+                    const dateStr = v.added_at ? v.added_at.slice(0, 10) : 'unknown';
+                    let label: string;
+                    if (dateStr === todayStr) label = 'Today';
+                    else if (dateStr === yesterdayStr) label = 'Yesterday';
+                    else label = dateStr;
+                    if (!groups[label]) groups[label] = [];
+                    groups[label].push(v);
+                  }
+
+                  return Object.entries(groups).map(([label, entries]) => {
+                    const isCollapsed = collapsedDates[label] ?? false;
+                    return (
+                      <div key={label} style={{ marginBottom: '8px' }}>
+                        <div
+                          onClick={() => setCollapsedDates(prev => ({ ...prev, [label]: !(prev[label] ?? false) }))}
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            cursor: 'pointer',
+                            padding: '4px 0',
+                            borderBottom: '1px solid #5a3d2b',
+                            fontSize: '12px',
+                            fontWeight: 'bold',
+                            color: '#8b7355',
+                            fontFamily: 'Georgia, serif',
+                          }}
+                        >
+                          <span>{label} ({entries.length})</span>
+                          <span style={{ fontSize: '10px' }}>{isCollapsed ? '\u25B6' : '\u25BC'}</span>
+                        </div>
+                        {!isCollapsed && entries.map((v) => {
+                          const isExpanded = expandedVocab[v.lemma] ?? false;
+                          return (
+                            <div key={v.lemma} style={{ marginBottom: '2px' }}>
+                              <div
+                                onClick={() => {
+                                  const newExpanded = !isExpanded;
+                                  setExpandedVocab(prev => ({ ...prev, [v.lemma]: newExpanded }));
+                                  if (newExpanded && !vocabInflect[v.lemma]) {
+                                    // Fetch inflection table
+                                    setVocabInflecting(prev => ({ ...prev, [v.lemma]: true }));
+                                    fetch(`${API}/api/inflect`, {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({ lemma: v.lemma }),
+                                    })
+                                      .then(r => r.json())
+                                      .then(data => {
+                                        setVocabInflect(prev => ({ ...prev, [v.lemma]: data.table || null }));
+                                        setVocabInflecting(prev => ({ ...prev, [v.lemma]: false }));
+                                      })
+                                      .catch(() => {
+                                        setVocabInflect(prev => ({ ...prev, [v.lemma]: null }));
+                                        setVocabInflecting(prev => ({ ...prev, [v.lemma]: false }));
+                                      });
+                                  }
+                                }}
+                                style={{
+                                  padding: '5px 4px',
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  justifyContent: 'space-between',
+                                  alignItems: 'flex-start',
+                                  borderBottom: '1px solid #4a3320',
+                                  backgroundColor: isExpanded ? '#4a3320' : 'transparent',
+                                  borderRadius: '3px',
+                                }}
+                              >
+                                <div style={{ flex: 1 }}>
+                                  <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#e8d5b0' }}>{v.lemma_form || v.lemma}</div>
+                                  {!isExpanded && (
+                                    <div style={{ fontSize: '11px', color: '#8b7355', fontStyle: 'italic' }}>{v.pos}</div>
+                                  )}
+                                </div>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleRemoveVocab(v.lemma); }}
+                                  title="Remove from vocabulary"
+                                  style={{
+                                    padding: '1px 6px',
+                                    fontSize: '10px',
+                                    border: '1px solid #8b4513',
+                                    borderRadius: '3px',
+                                    backgroundColor: '#5a3d2b',
+                                    color: '#e8d5b0',
+                                    cursor: 'pointer',
+                                    fontFamily: 'Georgia, serif',
+                                    marginLeft: '4px',
+                                  }}
+                                >
+                                  {'\u2715'}
+                                </button>
+                              </div>
+                              {isExpanded && (
+                                <div style={{ padding: '4px 8px 8px 8px', backgroundColor: '#4a3320', borderRadius: '0 0 3px 3px', marginBottom: '2px' }}>
+                                  <div style={{ fontSize: '12px', color: '#c4a77d', fontStyle: 'italic', marginBottom: '4px' }}>
+                                    <span style={{ color: '#8b7355' }}>POS: </span>{v.pos}
+                                  </div>
+                                  <div style={{ fontSize: '12px', color: '#c4a77d', fontStyle: 'italic', marginBottom: '6px' }}>
+                                    <span style={{ color: '#8b7355' }}>Meaning: </span>{v.meaning}
+                                  </div>
+                                  {/* Inflection table */}
+                                  {vocabInflecting[v.lemma] ? (
+                                    <div style={{ color: '#8b7355', fontStyle: 'italic', fontSize: '11px' }}>Loading inflection\u2026</div>
+                                  ) : vocabInflect[v.lemma] ? (
+                                    <div style={{ borderTop: '1px solid #5a3d2b', paddingTop: '4px' }}>
+                                      <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#8b7355', marginBottom: '2px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <span>{'\uD83D\uDCCA'} Inflection</span>
+                                        <span
+                                          onClick={(e) => { e.stopPropagation(); setVocabInflect(prev => ({ ...prev, [v.lemma]: null })); }}
+                                          style={{ cursor: 'pointer', color: '#8b7355', fontSize: '10px', fontWeight: 'normal' }}
+                                        >
+                                          {'\u2715'} Close
+                                        </span>
+                                      </div>
+                                      {Object.entries(vocabInflect[v.lemma]!).map(([section, rows]) => (
+                                        <div key={section} style={{ marginBottom: '4px' }}>
+                                          <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#6b4c2a', marginBottom: '1px' }}>{section}</div>
+                                          {rows.slice(0, 6).map((row, ri) => (
+                                            <div key={ri} style={{ fontSize: '11px', color: '#c4a77d', padding: '1px 0', display: 'flex', gap: '6px' }}>
+                                              <span style={{ color: '#8b7355', minWidth: '70px' }}>{row.case || row.person || ''} {row.number || ''}</span>
+                                              <span style={{ color: '#e8d5b0' }}>{row.form}</span>
+                                            </div>
+                                          ))}
+                                          {rows.length > 6 && (
+                                            <div style={{ fontSize: '10px', color: '#6b4c2a', fontStyle: 'italic' }}>... {rows.length - 6} more</div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
