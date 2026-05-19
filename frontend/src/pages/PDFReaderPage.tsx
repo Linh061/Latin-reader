@@ -316,6 +316,7 @@ export default function PDFReaderPage() {
 
   const [currentPdfId, setCurrentPdfId] = useState(routePdfId || '');
   const [pageNum, setPageNum] = useState(1);
+  const [pageInput, setPageInput] = useState('1');
   const [totalPages, setTotalPages] = useState(0);
   const [pageData, setPageData] = useState<PdfPageResponse | null>(null);
   const [modelType, setModelType] = useState<'print' | 'manuscript'>('print');
@@ -389,6 +390,11 @@ export default function PDFReaderPage() {
       setPageNum(1);
     }
   }, [routePdfId]);
+
+  // Sync pageInput when pageNum changes externally (Prev/Next, keyboard, bookmarks)
+  useEffect(() => {
+    setPageInput(String(pageNum));
+  }, [pageNum]);
 
   // Save reading progress on every page change
   useEffect(() => {
@@ -1260,15 +1266,17 @@ export default function PDFReaderPage() {
               type="number"
               min={1}
               max={totalPages}
-              value={pageNum}
+              value={pageInput}
               onChange={(e) => {
-                const v = parseInt(e.target.value, 10);
-                if (!isNaN(v) && v >= 1 && v <= totalPages) goToPage(v);
+                setPageInput(e.target.value);
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   const v = parseInt((e.target as HTMLInputElement).value, 10);
-                  if (v >= 1 && v <= totalPages) goToPage(v);
+                  if (!isNaN(v) && v >= 1 && v <= totalPages) {
+                    goToPage(v);
+                    setPageInput(String(v));
+                  }
                 } else if (e.key === 'ArrowLeft') {
                   e.preventDefault();
                   goToPage(pageNum - 1);

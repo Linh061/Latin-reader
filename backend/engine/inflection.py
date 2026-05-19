@@ -4,6 +4,7 @@ Inflection table generator using sqlite3 CLI subprocess (thread-safe).
 Groups forms by morphology codes to build declension/conjugation tables.
 """
 import os
+import re
 import subprocess
 from typing import Optional, List, Dict
 

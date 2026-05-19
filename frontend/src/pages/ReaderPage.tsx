@@ -380,6 +380,7 @@ export default function ReaderPage() {
   const [inflectTable, setInflectTable] = useState<{ lemma: string; table: InflectResponse['table'] } | null>(null);
   const [inflecting, setInflecting] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const [pageInput, setPageInput] = useState('1');
   const [pagination, setPagination] = useState<{
     page: number;
     per_page: number;
@@ -502,6 +503,11 @@ export default function ReaderPage() {
       loadBookmarks(bookId);
     }
   }, [bookId]); // only on mount/bookId change
+
+  // Sync pageInput when page changes externally (Prev/Next, keyboard, bookmarks)
+  useEffect(() => {
+    setPageInput(String(page));
+  }, [page]);
 
   // Save reading progress on every page change
   useEffect(() => {
@@ -1212,15 +1218,17 @@ export default function ReaderPage() {
             {'\u25C0'} Prev
           </button>
           <span style={S.pageInfo}>Page {page} of {pagination.total_pages}</span>
-          <input type="number" min={1} max={pagination.total_pages} value={page}
+          <input type="number" min={1} max={pagination.total_pages} value={pageInput}
             onChange={(e) => {
-              const v = parseInt(e.target.value, 10);
-              if (!isNaN(v) && v >= 1 && v <= pagination.total_pages) setPage(v);
+              setPageInput(e.target.value);
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 const v = parseInt((e.target as HTMLInputElement).value, 10);
-                if (v >= 1 && v <= pagination.total_pages) setPage(v);
+                if (!isNaN(v) && v >= 1 && v <= pagination.total_pages) {
+                  setPage(v);
+                  setPageInput(String(v));
+                }
               } else if (e.key === 'ArrowLeft') {
                 e.preventDefault();
                 setPage(p => Math.max(1, p - 1));

@@ -240,7 +240,7 @@ class Lemmatizer:
 
         # 1. Prefix match (fastest)
         prefix_rows = _query("""
-            SELECT DISTINCT f.form, l.lemma, l.pos, l.meaning
+            SELECT DISTINCT f.form, f.morphology, l.lemma, l.pos, l.meaning
             FROM forms f
             JOIN lemmas l ON f.lemma_id = l.id
             WHERE f.form LIKE ? || '%'
@@ -255,11 +255,15 @@ class Lemmatizer:
                 if lemma in seen:
                     continue
                 seen.add(lemma)
+                morph_raw = r["morphology"] or ""
+                morph_info = parse_morph(morph_raw)
+                morph_readable = ", ".join(v for v in morph_info.values() if v)
                 results.append({
                     "form": r["form"],
                     "lemma": lemma,
                     "part_of_speech": r["pos"],
                     "meaning": r["meaning"] or "",
+                    "morphology": morph_readable or morph_raw,
                     "distance": 0,
                     "highlight": _highlight_ranges(r["form"], w),
                 })
@@ -269,7 +273,7 @@ class Lemmatizer:
 
         # 2. LIKE match (contains)
         like_rows = _query("""
-            SELECT DISTINCT f.form, l.lemma, l.pos, l.meaning
+            SELECT DISTINCT f.form, f.morphology, l.lemma, l.pos, l.meaning
             FROM forms f
             JOIN lemmas l ON f.lemma_id = l.id
             WHERE f.form LIKE '%' || ? || '%'
@@ -284,11 +288,15 @@ class Lemmatizer:
                 if lemma in seen:
                     continue
                 seen.add(lemma)
+                morph_raw = r["morphology"] or ""
+                morph_info = parse_morph(morph_raw)
+                morph_readable = ", ".join(v for v in morph_info.values() if v)
                 results.append({
                     "form": r["form"],
                     "lemma": lemma,
                     "part_of_speech": r["pos"],
                     "meaning": r["meaning"] or "",
+                    "morphology": morph_readable or morph_raw,
                     "distance": 1,
                     "highlight": _highlight_ranges(r["form"], w),
                 })
@@ -315,6 +323,7 @@ class Lemmatizer:
                     "lemma": lemma,
                     "part_of_speech": r["pos"],
                     "meaning": r["meaning"] or "",
+                    "morphology": "",
                     "distance": 0,
                     "highlight": _highlight_ranges(r["lemma"], w),
                 })
